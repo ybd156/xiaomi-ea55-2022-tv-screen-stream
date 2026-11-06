@@ -1,0 +1,49 @@
+# TV Screen Stream
+
+> 把 Amlogic 电视的实时画面和声音推到浏览器的自托管方案。
+> 适用于 Amlogic 芯片 + 已 root 的电视，用厂商 screencontrol 硬件回采，
+> 绕开 SurfaceFlinger（普通截屏拿到的视频区是全黑的）。
+
+## 核心事实
+
+- 目标设备：小米 MiTV-ASTP0，Amlogic T5，Android 9 / API 28 / armeabi-v7a，Magisk root
+- 语言：Java（跑在 `app_process` 上的 dex），无 Gradle
+- 输出：HTTP :8899，网页 / MJPEG / 裸 JPEG / 裸 PCM 音频
+- 帧率上限：约 18 fps（厂商接口固定开销，实测非编码瓶颈）
+- 无鉴权、无 TLS，仅限可信局域网
+
+## 文档
+
+- [README.md](README.md)：项目介绍与快速开始
+- [AGENTS.md](AGENTS.md)：AI 接手契约（状态分级、硬约束、禁止事项）
+- [docs/DEVICE.md](docs/DEVICE.md)：目标设备完整配置
+- [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md)：回采链路原理与反汇编结论
+- [docs/API.md](docs/API.md)：HTTP 接口
+- [docs/BUILD.md](docs/BUILD.md)：构建与部署
+- [docs/PITFALLS.md](docs/PITFALLS.md)：12 个已踩的坑
+- [docs/MEASUREMENTS.md](docs/MEASUREMENTS.md)：全部实测数据
+- [docs/UNIVERSALITY.md](docs/UNIVERSALITY.md)：适用范围与多平台设想
+- [ai/facts.json](ai/facts.json)：机器可读的结构化事实
+
+## 源码
+
+- [src/com/droidlogic/app/ScreenControlManager.java](src/com/droidlogic/app/ScreenControlManager.java)：主程序（回采 + HTTP + 网页）
+- [src/com/droidlogic/app/AudioStream.java](src/com/droidlogic/app/AudioStream.java)：声音回采
+- [src/com/droidlogic/app/H264Stream.java](src/com/droidlogic/app/H264Stream.java)：H.264 推流实验
+- [src/com/droidlogic/app/TsMuxer.java](src/com/droidlogic/app/TsMuxer.java)：MPEG-TS 封装
+
+## 关键结论（省得重新推导）
+
+- 不能用 screencap / MediaProjection / scrcpy：视频在独立硬件层，全黑
+- `sourceType` 只能用 1（0 超时，2 会让守护进程 SIGABRT）
+- `startScreenCapBuffer` 前 4 参是裁剪矩形，后 2 参才是输出尺寸
+- 禁止 `startScreenRecord`：会把播放器踢出硬解
+- native 客户端不提速（瓶颈在守护进程内部）
+- `ScreenManager` 持久会话不可行（帧泵在 `libstagefright_screencatch.so`，不在可及范围）
+- 音频必须按 8 声道采，且是"音量之后"的抽头（静音则无声）
+- NDK 的 `clang.exe` 段错误，要用 `clang-cl.exe` + 设备 libc stub
+
+## 不做的事
+
+- 不做多平台适配（无第二台设备可验证）
+- 不声称零延迟 / 支持硬解 / 一定能打洞

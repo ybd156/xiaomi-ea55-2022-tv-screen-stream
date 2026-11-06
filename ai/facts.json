@@ -1,0 +1,173 @@
+{
+  "$comment": "机器可读的事实快照。所有数字都来自真机实测，未测项标 null 并注明原因。禁止在此文件中填写推测值。",
+  "schema_version": "1",
+  "generated_at": "2026-11-06",
+  "project": {
+    "name": "tv-screen-stream",
+    "purpose": "把 Amlogic 电视的实时画面与声音推到浏览器",
+    "status_levels": ["已提出", "已实现", "已编译", "已自测", "已真机验证"],
+    "license": null,
+    "verified_device_count": 1
+  },
+  "device": {
+    "model": "MiTV-ASTP0",
+    "brand": "Xiaomi",
+    "device_codename": "mulan",
+    "soc_vendor": "amlogic",
+    "soc_dt_compatible": "amlogic, t5_t963_ak301",
+    "hardware_prop": "amlogic",
+    "android_release": "9",
+    "api_level": 28,
+    "abi_list": ["armeabi-v7a", "armeabi"],
+    "kernel": "4.9.113",
+    "cpu_cores": 4,
+    "cpu_max_khz": 1800000,
+    "mem_total_kb": 1537828,
+    "display_width": 1920,
+    "display_height": 1080,
+    "panel_fps_options": [50, 60],
+    "root": {
+      "scheme": "magisk",
+      "verified": true,
+      "probe": "su -c id => uid=0(root) context=u:r:magisk:s0"
+    },
+    "firmware_build": "23.2.15.1886"
+  },
+  "codecs": {
+    "hw_decoders": [
+      "OMX.amlogic.avc.decoder.awesome",
+      "OMX.amlogic.hevc.decoder.awesome",
+      "OMX.amlogic.mpeg2.decoder.awesome",
+      "OMX.amlogic.mpeg4.decoder.awesome",
+      "OMX.amlogic.h263.decoder.awesome"
+    ],
+    "hw_encoders": [],
+    "sw_encoders": [
+      "OMX.google.h264.encoder",
+      "OMX.google.h263.encoder",
+      "OMX.google.mpeg4.encoder",
+      "OMX.google.vp8.encoder"
+    ],
+    "hw_jpeg_encoder": false,
+    "hw_decode_limits": {
+      "1080p60_h264": { "in_fps": 60, "out_fps": 60, "drop": 1 },
+      "4k60_h264": { "in_fps": 60, "out_fps": 32, "drop": 27 }
+    }
+  },
+  "vendor_service": {
+    "daemon": "/system/bin/screencontrol",
+    "service_lib": "/system/lib/libscreencontrolservice.so",
+    "client_lib": "/vendor/lib/libscreencontrolclient.so",
+    "jni_lib": "/vendor/lib/libscreencontrol_jni.so",
+    "hal_lib": "/vendor/lib/vendor.amlogic.hardware.screencontrol@1.0.so",
+    "hidl_service": "vendor.amlogic.hardware.screencontrol@1.0::IScreenControl/default",
+    "java_class_name": "com.droidlogic.app.ScreenControlManager",
+    "java_class_exists_on_device": false,
+    "native_methods": {
+      "native_ConnectScreenControl": "()V",
+      "native_ScreenCap": "(IIIIIIILjava/lang/String;)I",
+      "native_ScreenRecord": "(IIIIIILjava/lang/String;)I",
+      "native_ScreenCapBuffer": "(IIIIIII)[B",
+      "native_ForceStop": "()V"
+    },
+    "source_type": {
+      "0": "read timeout, 不可用",
+      "1": "正常，唯一可用值",
+      "2": "仅 OSD，导致守护进程 SIGABRT"
+    }
+  },
+  "audio": {
+    "card": 0,
+    "card_name": "AMLAUGESOUND",
+    "loopback_pcm_device": 7,
+    "loopback_node": "/dev/snd/pcmC0D7c",
+    "capture_channels_required": 8,
+    "capture_channels_working_2ch": false,
+    "output_channels": 2,
+    "rate_hz": 48000,
+    "bit_depth": 16,
+    "format": "S16LE interleaved",
+    "bitrate_mbps": 1.5,
+    "tap_point": "post-volume (电视静音则无声)",
+    "mixer_controls": {
+      "Loopback tdmin lb source": ["TDMOUT_A", "TDMOUT_B", "TDMOUT_C", "TDMIN_A", "TDMIN_B", "TDMIN_C"],
+      "Loopback datain source": ["TDMIN_A", "TDMIN_B", "TDMIN_C", "SPDIFIN", "PDMIN"]
+    },
+    "default_source": "TDMOUT_B",
+    "sources_with_confirmed_signal": ["TDMOUT_B"]
+  },
+  "measurements": {
+    "raw_capture_fps": {
+      "1920x1080": 3.3,
+      "1280x720": 6.0,
+      "960x540": 9.6,
+      "640x360": 14.0,
+      "480x270": 16.6,
+      "320x180": 25.1
+    },
+    "mjpeg_e2e_fps": {
+      "960x540": 8.7,
+      "640x360": 14.9,
+      "480x270": 17.2,
+      "320x180": 18.3
+    },
+    "h264_e2e_fps": {
+      "640x360": 12.9,
+      "480x270": 14.7,
+      "320x180": 17.4
+    },
+    "mjpeg_bitrate_mbps": {
+      "960x540": 5.0,
+      "640x360": 4.8,
+      "480x270": 3.8,
+      "320x180": 2.1
+    },
+    "h264_bitrate_kbps": {
+      "640x360": 650,
+      "480x270": 325,
+      "320x180": 360
+    },
+    "copy_bandwidth_mbps": 30,
+    "fixed_wait_ms": 32,
+    "process_rss_mb": 76,
+    "cpu_core_delta": [1.3, 1.8]
+  },
+  "falsified_optimizations": [
+    { "idea": "native 客户端绕开 Java byte[] 拷贝", "result": "无效", "evidence": "640x360: native 69.6-74.9ms vs java 71.7ms" },
+    { "idea": "多线程并发采集", "result": "收益 12% 但 CPU 翻倍", "evidence": "960x540: 1线程 9.9fps -> 2线程 11.1fps" },
+    { "idea": "降低 JPEG 质量", "result": "不影响帧率", "evidence": "q70 11.6fps vs q55 11.5fps" },
+    { "idea": "GE2D 硬件加速", "result": "帮不上帧率", "evidence": "瓶颈在采集侧" },
+    { "idea": "ScreenManager 持久会话", "result": "不可行", "evidence": "帧泵在 libstagefright_screencatch.so，不在可及范围" },
+    { "idea": "硬件编码", "result": "不存在", "evidence": "media_codecs.xml 无 amlogic encoder" }
+  ],
+  "http_api": {
+    "port_default": 8899,
+    "endpoints": {
+      "/": "HTML 播放器",
+      "/raw": "裸 JPEG 连发",
+      "/stream": "MJPEG multipart",
+      "/snap": "单帧 JPEG",
+      "/stats": "JSON 状态",
+      "/set?w=&h=": "切换分辨率",
+      "/audio?src=": "切换音源",
+      "/pcm": "裸 PCM 音频流",
+      "/wake": "唤醒",
+      "/sleep": "息屏"
+    }
+  },
+  "not_verified": [
+    "其他 Amlogic 机型",
+    "非 Amlogic 芯片",
+    "Android 10+",
+    "H.264 在浏览器中播放",
+    "多客户端并发稳定性",
+    "长时间（>1 小时）运行稳定性"
+  ],
+  "known_limitations": [
+    "无鉴权、无 TLS",
+    "息屏时无法采集",
+    "电视静音时采不到声音",
+    "帧率上限约 18fps",
+    "依赖 root"
+  ]
+}
