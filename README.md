@@ -57,6 +57,7 @@ adb shell su -c 'sh /data/local/tmp/stop_srv.sh'
 | 声音来源 | 电视扬声器 / 麦克风 / SPDIF 输入，可切 |
 | 远程唤醒 / 息屏 | 网页按钮，等价于遥控器电源键 |
 | 状态上报 | `/stats` 返回 fps、带宽、分辨率、在线人数、醒睡状态 |
+| 开机自启 | Magisk `service.d` 脚本，开机自动起 + 崩溃自愈 |
 
 ## 实测性能
 

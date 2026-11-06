@@ -230,3 +230,78 @@ cp "$STAGE/classes.dex" build/classes.dex
 ```
 
 顺带的好处：仓库可以放在任意目录（含中文）而不影响构建。
+
+---
+
+## P14 · Magisk service.d 里 PATH 很精简
+
+**症状**
+
+```
+/data/adb/service.d/tv-screen-stream.sh: line 49: app_process: not found
+```
+
+脚本手动跑没问题，开机就找不到 `app_process`。
+
+**原因**：Magisk 执行 `service.d` 时环境变量很精简，`PATH` 不含 `/system/bin`。
+
+**对策**
+
+```sh
+export PATH=/system/bin:/system/xbin:/vendor/bin:/sbin:$PATH
+# 或者直接用绝对路径
+CLASSPATH=$DEX /system/bin/app_process ...
+```
+
+---
+
+## P15 · `ps -o ARGS` 单列输出会被截断
+
+**症状**：`ps -A -o PID,ARGS | grep 类名` 能匹配，但 `ps -A -o ARGS | grep 类名` 匹配不到，
+导致守护脚本以为服务没起来，反复拉起 → **多个实例**。
+
+**对策**：别用 `ps` 做存活判断，改用 **pidfile + /proc**：
+
+```sh
+running() {
+    [ -f "$PIDFILE" ] || return 1
+    p=$(cat "$PIDFILE" 2>/dev/null); [ -n "$p" ] || return 1
+    [ -d "/proc/$p" ] || return 1
+    tr ' ' ' ' < "/proc/$p/cmdline" | grep -q 'com.droidlogic.app.ScreenControlManager' || return 1
+    return 0
+}
+```
+
+---
+
+## P16 · 改完正在运行的 shell 脚本会把它搞坏
+
+**症状**：脚本报 `syntax error: unmatched 'if'` 或行为错乱。
+
+**原因**：`sh` 是边读边执行的，覆盖正在运行的文件会让它读到半截内容。
+
+**对策**：改脚本前先 `kill` 掉旧进程，改完再启动。别直接覆盖正在跑的脚本。
+
+---
+
+## P17 · Windows 上写的脚本带 CRLF，Android 跑不了
+
+**症状**
+
+```
+/data/adb/service.d/xxx.sh[13]: : not found
+syntax error: unmatched 'if'
+```
+
+**原因**：Python `io.open(p,'w')` 在 Windows 默认把 `
+` 写成 `
+`，`` 被当成 token 的一部分。
+
+**对策**：写脚本时显式 `newline=''`，或写完做一次转换：
+
+```python
+s = io.open(p, encoding='utf-8', newline='').read().replace('
+', '
+')
+io.open(p, 'w', encoding='utf-8', newline='').write(s)
+```
