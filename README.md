@@ -1,6 +1,6 @@
 # TV Screen Stream
 
-把一台 **小米电视（Amlogic T5 / Android 9 / 已 root）** 的**实时画面 + 声音**推到浏览器里看。
+把一台 **小米电视 EA55 2022 款（Amlogic T5 / Android 9 / 已 root）** 的**实时画面 + 声音**推到浏览器里看。
 端口 8899，一个网页搞定，支持切分辨率、切音源、远程唤醒/息屏。
 
 ![实际采集画面](assets/frame-960x540.jpg)

@@ -5,7 +5,7 @@
 
 ## 0. 一分钟事实
 
-- 目标设备：**小米电视 MiTV-ASTP0**，Amlogic T5，Android 9 / API 28 / armeabi-v7a，**已 root（Magisk）**。
+- 目标设备：**小米电视 EA55 2022 款**（型号代码 `MiTV-ASTP0`），Amlogic T5，Android 9 / API 28 / armeabi-v7a，**已 root（Magisk）**。
 - 干什么：把电视的画面和声音推到浏览器，`http://<tv-ip>:8899/`。
 - 核心机制：`app_process` 跑 dex → `System.load("/vendor/lib/libscreencontrol_jni.so")` → 调用厂商 `startScreenCapBuffer` 拿 RGBA 帧。
 - 为什么不用 screencap：视频走独立硬件层，`SurfaceFlinger` 截图全黑。

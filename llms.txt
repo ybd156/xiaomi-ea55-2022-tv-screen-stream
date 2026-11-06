@@ -6,7 +6,7 @@
 
 ## 核心事实
 
-- 目标设备：小米 MiTV-ASTP0，Amlogic T5，Android 9 / API 28 / armeabi-v7a，Magisk root
+- 目标设备：小米电视 EA55 2022 款（MiTV-ASTP0），Amlogic T5，Android 9 / API 28 / armeabi-v7a，Magisk root
 - 语言：Java（跑在 `app_process` 上的 dex），无 Gradle
 - 输出：HTTP :8899，网页 / MJPEG / 裸 JPEG / 裸 PCM 音频
 - 帧率上限：约 18 fps（厂商接口固定开销，实测非编码瓶颈）
