@@ -92,7 +92,7 @@ GET /audio
 
 | `src` 取值 | 底层控件 | 说明 |
 |---|---|---|
-| `TDMOUT_A` / `TDMOUT_B` / `TDMOUT_C` | `Loopback tdmin lb source` | `TDMOUT_B` = 电视扬声器（唯一确认有信号） |
+| `TDMOUT_A` / `TDMOUT_B` / `TDMOUT_C` | `Loopback tdmin lb source` | 同一路混音的三个输出口，内容相同；网页只保留「电视声音」一项（`TDMOUT_B`），A/C 仍可通过 API 调 |
 | `PDMIN` | `Loopback datain source` | 麦克风（需要电视有远场拾音） |
 | `SPDIFIN` | `Loopback datain source` | SPDIF 输入 |
 | `TDMIN_A/B/C` | `Loopback datain source` | 内部 TDM 输入 |
