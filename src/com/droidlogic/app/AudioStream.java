@@ -9,13 +9,14 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 电视声音回采：Amlogic 的 LOOPBACK-A 设备 (/dev/snd/pcmC0D7c) 录的是播放混音。
+ * 电视声音回采：直接从 TDM-B 的采集端 (pcmC0D1c) 取播放混音。
+ * （LOOPBACK-A / pcmC0D7c 只能读到静音，且一个 period 就停，已弃用。）
  * 用系统自带的 tinycap 写 FIFO，本类读 FIFO 并广播给网页（裸 PCM，S16LE）。
  */
 public class AudioStream {
 
     public static final int RATE = 48000;
-    public static final int CH = 8;      // TDM-B 是 8 声道，必须按 8 声道抓
+    public static final int CH = 2;      // TDM-B 采集端（pcm1c）是 2 声道
     public static final int OUT_CH = 2;  // 下混成 2 声道再发出去
 
     /** 每个音频客户端最多积压的块数 / 字节数（一块约 2 KB，约 94 块/秒） */
@@ -101,7 +102,7 @@ public class AudioStream {
         return false;
     }
 
-    /** 起采集泵线程：读 FIFO → 8ch 下混 2ch → 投递给各客户端 */
+    /** 起采集泵线程：读 FIFO → 2ch 直通（CH==2 时就是原样）→ 投递给各客户端 */
     static void startPump(final String fifo) {
 
         pumpThread = new Thread(() -> {
@@ -110,7 +111,7 @@ public class AudioStream {
             try (InputStream in = new FileInputStream(fifo)) {
                 int n;
                 while (running && (n = in.read(buf)) > 0) {
-                    // 8ch -> 2ch：取 ch0/ch1
+                    // CH==2 时就是原样拷贝（ch0/ch1）；CH==8 时下混取前两声道
                     int frames = n / (CH * 2);
                     int off = 0;
                     for (int i = 0; i < frames; i++) {
@@ -289,7 +290,7 @@ public class AudioStream {
     }
 
     static boolean isDeviceClosed() {
-        try (InputStream in = new FileInputStream("/proc/asound/card0/pcm7c/sub0/hw_params")) {
+        try (InputStream in = new FileInputStream("/proc/asound/card0/pcm1c/sub0/hw_params")) {
             byte[] b = new byte[256];
             int n = in.read(b);
             if (n <= 0) return true;
@@ -348,7 +349,7 @@ public class AudioStream {
         }
     }
 
-    /** 起一个 tinycap 进程（把设备 7 的 8 声道数据写进 FIFO） */
+    /** 起一个 tinycap 进程（把 device 1 / pcmC0D1c 的 2 声道数据写进 FIFO） */
     static Process launchTinycap(String fifo, int card, int device) throws java.io.IOException {
         return Runtime.getRuntime().exec(new String[]{
                 "tinycap", fifo,

@@ -52,7 +52,7 @@ adb shell su -c 'sh /data/local/tmp/stop_srv.sh'
 | 功能 | 说明 |
 |---|---|
 | 实时画面 | MJPEG / 裸 JPEG 流，网页用 canvas 渲染 |
-| 实时声音 | 从 ALSA `LOOPBACK-A` 回采，48kHz 立体声 |
+| 实时声音 | 从 ALSA `TDM-B` 采集端（`pcmC0D1c`）取播放混音，48kHz 立体声 |
 | 分辨率切换 | 网页下拉框实时切换，320×180 ~ 1920×1080 |
 | 声音来源 | 电视扬声器 / 麦克风 / SPDIF 输入，可切 |
 | 远程唤醒 / 息屏 | 网页按钮，等价于遥控器电源键 |

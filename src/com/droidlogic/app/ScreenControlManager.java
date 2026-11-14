@@ -214,7 +214,9 @@ public class ScreenControlManager {
         CUR_H = h;
         startPipeline(srcType, w, h);
 
-        try { AudioStream.start(0, 7); } catch (Throwable t) { System.out.println("audio start fail: " + t); }
+        // 采 TDM-B 的采集端（pcm1c, device 1）：节目音频实际在 TDM-B 上，
+        // 而 LOOPBACK-A(device 7) 只能读到静音、且一个 period 就停。
+        try { AudioStream.start(0, 1); } catch (Throwable t) { System.out.println("audio start fail: " + t); }
 
         ServerSocket ss = new ServerSocket(port);
         System.out.println("LISTEN " + port);
