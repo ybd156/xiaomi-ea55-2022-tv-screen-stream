@@ -407,6 +407,11 @@ public class ScreenControlManager {
         KEYS.put("NEXT", 87);          KEYS.put("PREVIOUS", 88);
         KEYS.put("ENTER", 66);         KEYS.put("DEL", 67);
         KEYS.put("SETTINGS", 176);     KEYS.put("TV_INPUT", 178);
+        KEYS.put("NUM_0", 7);          KEYS.put("NUM_1", 8);
+        KEYS.put("NUM_2", 9);          KEYS.put("NUM_3", 10);
+        KEYS.put("NUM_4", 11);         KEYS.put("NUM_5", 12);
+        KEYS.put("NUM_6", 13);         KEYS.put("NUM_7", 14);
+        KEYS.put("NUM_8", 15);         KEYS.put("NUM_9", 16);
     }
 
     /** 取查询参数（不做 URL 解码；/key 的取值只允许 [A-Z_]） */
@@ -478,8 +483,10 @@ public class ScreenControlManager {
       + "#off button{padding:10px 22px;font-size:15px;border-color:#3a3a46}"
       + "@media(max-width:680px){.stat{display:none}}"
       + "#rc{position:fixed;right:10px;bottom:10px;display:none;grid-template-columns:repeat(3,60px);gap:6px;"
-      + "background:#141419f2;border:1px solid #2c2c36;border-radius:12px;padding:10px;z-index:9;box-shadow:0 6px 24px #000a}"
+      + "background:#141419f2;border:1px solid #2c2c36;border-radius:12px;padding:10px;z-index:9;box-shadow:0 6px 24px #000a;"
+      + "max-height:calc(100vh - 20px);overflow:auto}"
       + "#rc.on{display:grid}"
+      + "#rc .numpad{grid-column:span 3;display:grid;grid-template-columns:repeat(5,1fr);gap:6px}"
       + "#rc button{padding:11px 0;font-size:15px;border-radius:9px;border:1px solid #2c2c36;background:#1e1e26;color:#d7d7dd;cursor:pointer}"
       + "#rc button:active{background:#2ecc71;color:#0b0b0d}"
       + "#rc .gap{visibility:hidden}"
@@ -507,12 +514,16 @@ public class ScreenControlManager {
       + "</select>"
       + "<button onclick=fs()>全屏</button><button onclick=shot()>截图</button>"
       + "<button onclick=\"document.getElementById('rc').classList.toggle('on')\">遥控</button></div>"
-      + "<div id=rc>"
+      + "<div id=rc class=on>"
       + "<span class=gap></span><button onclick=\"rc('DPAD_UP')\">▲</button><span class=gap></span>"
       + "<button onclick=\"rc('DPAD_LEFT')\">◀</button><button onclick=\"rc('DPAD_CENTER')\">OK</button><button onclick=\"rc('DPAD_RIGHT')\">▶</button>"
       + "<span class=gap></span><button onclick=\"rc('DPAD_DOWN')\">▼</button><span class=gap></span>"
       + "<button onclick=\"rc('BACK')\">返回</button><button onclick=\"rc('HOME')\">主页</button><button onclick=\"rc('MENU')\">菜单</button>"
       + "<button onclick=\"rc('VOLUME_DOWN')\">音量−</button><button onclick=\"rc('MUTE')\">静音</button><button onclick=\"rc('VOLUME_UP')\">音量+</button>"
+      + "<div class=numpad>"
+      + "<button onclick=\"rc('NUM_1')\">1</button><button onclick=\"rc('NUM_2')\">2</button><button onclick=\"rc('NUM_3')\">3</button><button onclick=\"rc('NUM_4')\">4</button><button onclick=\"rc('NUM_5')\">5</button>"
+      + "<button onclick=\"rc('NUM_6')\">6</button><button onclick=\"rc('NUM_7')\">7</button><button onclick=\"rc('NUM_8')\">8</button><button onclick=\"rc('NUM_9')\">9</button><button onclick=\"rc('NUM_0')\">0</button>"
+      + "</div>"
       + "<div class=wide><input id=txt placeholder=\"输入文字…\" onkeydown=\"if(event.key==='Enter')rcText()\">"
       + "<button onclick=\"rcText()\">发送</button></div>"
       + "</div>"

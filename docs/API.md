@@ -169,7 +169,7 @@ curl "http://<tv-ip>:8899/key?code=HOME&t=abc123"
 | `VOLUME_UP` / `VOLUME_DOWN` | 24 / 25 | `MUTE` | 164 |
 | `PLAY_PAUSE` | 85 | `NEXT` / `PREVIOUS` | 87 / 88 |
 | `DEL` | 67 | `SETTINGS` | 176 |
-| `TV_INPUT` | 178 | | |
+| `TV_INPUT` | 178 | `NUM_0` … `NUM_9` | 7 … 16 |
 
 **`POWER` 故意不在白名单里**：键码 26 是开关不是"唤醒"，盲发会把醒着的电视关掉
 （AGENTS.md §2.4）。电源请走 `/wake` 和 `/sleep`，它们内部先查 `dumpsys power`。
