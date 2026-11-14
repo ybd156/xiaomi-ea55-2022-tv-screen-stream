@@ -229,8 +229,27 @@ public class ScreenControlManager {
     }
 
     /** 起一套采集+编码线程；调用时旧的一代线程会自动退出 */
-    static void startPipeline(final int srcType, final int w, final int h) {
+    /** 当前这一代的采集线程（用于起新管线前等它真正退出） */
+    static volatile Thread CUR_CAP_THREAD;
+
+    /**
+     * 起一套采集+编码线程。
+     *
+     * **起新管线前必须等旧采集线程真的退出**：它可能正卡在厂商
+     * `native_ScreenCapBuffer` 里，退不出来就无法检查 gen，于是厂商
+     * `screencontrol` 那边会累积没释放的采集会话，最终返回空帧
+     * （日志里的 `capture miss len=0`），而且守护进程不自愈，只能重启电视。
+     * 加 synchronized 也防止两次 /set 并发进来各起一套。
+     */
+    static synchronized void startPipeline(final int srcType, final int w, final int h) {
         final int gen = ++GEN;
+        Thread old = CUR_CAP_THREAD;
+        if (old != null && old.isAlive()) {
+            try { old.join(1500); } catch (InterruptedException ignored) { }
+            if (old.isAlive()) {
+                System.out.println("警告：旧采集线程 1.5s 未退出，可能泄漏厂商采集会话");
+            }
+        }
         final int quality = JPEGQ;
         final Bitmap src = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
         final Object lock = new Object();
@@ -309,6 +328,7 @@ public class ScreenControlManager {
 
         capThread.setDaemon(true);
         encThread.setDaemon(true);
+        CUR_CAP_THREAD = capThread;
         capThread.start();
         encThread.start();
         System.out.println("pipeline gen=" + gen + " " + w + "x" + h);
