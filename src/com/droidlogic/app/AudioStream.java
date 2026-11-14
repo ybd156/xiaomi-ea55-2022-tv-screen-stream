@@ -63,6 +63,8 @@ public class AudioStream {
         for (int attempt = 1; attempt <= 3; attempt++) {
             running = true;
             stopping = false;
+            // 开设备前确认上一次的句柄真的放掉了（否则会 EBUSY，甚至把 DMA 搞卡）
+            waitDeviceFree(1500);
             try {
                 proc = launchTinycap(fifo, card, device);
             } catch (Throwable t) {
@@ -250,9 +252,16 @@ public class AudioStream {
         Process p = proc;
         proc = null;
         if (p != null) {
+            // 先 SIGTERM 让它自己退出。**不要一上来就 SIGKILL**：
+            // 强杀会让 ALSA 来不及释放设备，loopback 的 DMA 会卡住（TODDR time out），
+            // 之后任何采集都只能读到预填的一个 buffer，只能重启电视才能恢复。
             try { p.destroy(); } catch (Throwable ignored) { }
             try {
-                if (!p.waitFor(1, java.util.concurrent.TimeUnit.SECONDS)) p.destroyForcibly();
+                if (!p.waitFor(3, java.util.concurrent.TimeUnit.SECONDS)) {
+                    System.out.println("tinycap 3 秒未退出，强制结束");
+                    p.destroyForcibly();
+                    p.waitFor(1, java.util.concurrent.TimeUnit.SECONDS);
+                }
             } catch (Throwable ignored) { }
         }
         Thread t = pumpThread;
@@ -260,7 +269,33 @@ public class AudioStream {
         if (t != null) {
             try { t.join(500); } catch (InterruptedException ignored) { }
         }
+        // 等设备真的变成 closed 再返回，避免下一次 start() 撞 EBUSY 或把 DMA 搞卡
+        if (!waitDeviceFree(2000)) {
+            System.out.println("警告：/dev/snd/pcmC0D7c 仍被占用");
+        }
         lastPeak = 0;
+    }
+
+    /** 等 loopback 设备真正释放（hw_params 变成 closed），最多 ms 毫秒 */
+    static boolean waitDeviceFree(long ms) {
+        long deadline = System.currentTimeMillis() + ms;
+        while (System.currentTimeMillis() < deadline) {
+            if (isDeviceClosed()) return true;
+            try { Thread.sleep(100); } catch (InterruptedException ignored) { }
+        }
+        return isDeviceClosed();
+    }
+
+    static boolean isDeviceClosed() {
+        try (InputStream in = new FileInputStream("/proc/asound/card0/pcm7c/sub0/hw_params")) {
+            byte[] b = new byte[256];
+            int n = in.read(b);
+            if (n <= 0) return true;
+            String s = new String(b, 0, n, "UTF-8").trim();
+            return s.isEmpty() || s.equals("closed");
+        } catch (Throwable t) {
+            return true;      // 读不到就当已释放，不阻塞启动
+        }
     }
 
     /** 跑一条命令并收集输出，返回 "exit=<code>|<stdout+stderr>"；超时 3 秒 */
