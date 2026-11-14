@@ -55,32 +55,36 @@ public class AudioStream {
             lastError = "mkfifo: " + t;
             System.out.println(lastError);
         }
-        try {
-            proc = Runtime.getRuntime().exec(new String[]{
-                    "tinycap", fifo,
-                    "-D", String.valueOf(card),
-                    "-d", String.valueOf(device),
-                    "-c", String.valueOf(CH),
-                    "-r", String.valueOf(RATE),
-                    "-b", "16"
-            });
-        } catch (Throwable t) {
-            lastError = "tinycap: " + t;
-            System.out.println(lastError);
-            running = false;
-            return false;
-        }
-
-        // 校验 tinycap 真的活着：它打不开设备时会立刻退出，而旧实现对此一无所知
-        try {
-            Thread.sleep(300);
-        } catch (InterruptedException ignored) {
-        }
-        if (!proc.isAlive()) {
-            lastError = "tinycap 启动后立即退出（设备被占用或参数不支持）: " + drainQuietly(proc);
+        // 校验 tinycap 真的活着。设备释放有延迟：连续切音源时新 tinycap 常撞 EBUSY
+        // 而立刻退出，所以这里重试 3 次（每次 300ms 存活判定 + 250ms 间隔）。
+        boolean alive = false;
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            try {
+                proc = launchTinycap(fifo, card, device);
+            } catch (Throwable t) {
+                lastError = "tinycap 启动异常: " + t;
+                System.out.println(lastError);
+                running = false;
+                lastPeak = 0;
+                return false;
+            }
+            try { Thread.sleep(300); } catch (InterruptedException ignored) { }
+            if (proc.isAlive()) {
+                alive = true;
+                break;
+            }
+            lastError = "tinycap 第 " + attempt + " 次启动后立即退出: " + drainQuietly(proc);
             System.out.println(lastError);
             proc = null;
+            if (attempt < 3) {
+                try { Thread.sleep(250); } catch (InterruptedException ignored) { }
+            }
+        }
+        if (!alive) {
+            lastError = "tinycap 连续 3 次启动失败（设备被占用或参数不支持）: " + lastError;
+            System.out.println(lastError);
             running = false;
+            lastPeak = 0;
             return false;
         }
         System.out.println("tinycap started, fifo=" + fifo);
@@ -288,6 +292,18 @@ public class AudioStream {
             }
         } catch (Throwable ignored) {
         }
+    }
+
+    /** 起一个 tinycap 进程（把设备 7 的 8 声道数据写进 FIFO） */
+    static Process launchTinycap(String fifo, int card, int device) throws java.io.IOException {
+        return Runtime.getRuntime().exec(new String[]{
+                "tinycap", fifo,
+                "-D", String.valueOf(card),
+                "-d", String.valueOf(device),
+                "-c", String.valueOf(CH),
+                "-r", String.valueOf(RATE),
+                "-b", "16"
+        });
     }
 
     /** 读掉一个已退出进程的残余输出（用于把 tinycap 的错误原文带进 lastError） */
