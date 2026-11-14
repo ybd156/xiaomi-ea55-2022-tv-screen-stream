@@ -31,6 +31,8 @@
   "aclients": 1,
   "abytes": 40173568,
   "asrc": "TDMOUT_B",
+  "apeak": 2632,
+  "aerr": "",
   "awake": true
 }
 ```
@@ -46,6 +48,8 @@
 | `aclients` | 音频客户端数（**上限 1**） |
 | `abytes` | 累计发出的音频字节 |
 | `asrc` | 当前音源 |
+| `apeak` | 最近约 1 秒的音频峰值（0..32767），**0 = 当前音源没有信号** |
+| `aerr` | 音频链路最近一次错误原文（空字符串 = 正常） |
 | `awake` | 电视是否醒着（`dumpsys power`，2 秒缓存） |
 
 > `awake=false` 时画面一定是黑的（显示管线停了），但 `fps` 仍会跳动——那是黑帧。
@@ -65,8 +69,23 @@ GET /set?w=640&h=360
 
 ```
 GET /audio?src=TDMOUT_B
-→ {"ok":true,"src":"TDMOUT_B"}
+→ {"ok":true,"src":"TDMOUT_B","run":true,"peak":2632,"err":""}
 ```
+
+不带 `src` 时只查询状态，不切换：
+
+```
+GET /audio
+→ {"ok":true,"src":"TDMOUT_B","run":true,"peak":2632,"err":""}
+```
+
+| 字段 | 含义 |
+|---|---|
+| `ok` | 切换是否**真的成功**（不只是"命令发出去了"） |
+| `src` | 当前认定的音源（只有校验通过才会更新） |
+| `run` | `tinycap` 采集是否在跑 |
+| `peak` | 最近约 1 秒的采集峰值（0..32767）。**0 = 这个源当前没有信号** |
+| `err` | 失败原因原文（`tinymix` 退出码 / 回读值 / `tinycap` 报错） |
 
 | `src` 取值 | 底层控件 | 说明 |
 |---|---|---|
@@ -75,7 +94,12 @@ GET /audio?src=TDMOUT_B
 | `SPDIFIN` | `Loopback datain source` | SPDIF 输入 |
 | `TDMIN_A/B/C` | `Loopback datain source` | 内部 TDM 输入 |
 
-切换过程：`tinymix` 改路由 → 杀掉 `tinycap` → 重启 `tinycap`（约 0.4 秒断音）。
+切换过程：`tinymix` 改路由 → **回读校验** → 杀掉 `tinycap` → 重启并**校验存活**（约 0.4 秒断音）。
+任何一步失败都会 `ok:false` + `err` 说明原因，`src` 不会更新。
+
+> 2026-11-14 修复：旧实现丢弃 `tinymix` 的退出码、不回读、也不校验 `tinycap` 是否活着，
+> 所以控件名不对、取值不合法、设备被占用这三种情况**全都回 `ok:true`**，
+> 表现为"换音源没有作用"。现在这三种都会明确失败。
 
 ## `/wake` / `/sleep`
 

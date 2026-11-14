@@ -29,10 +29,21 @@ public class AudioStream {
     private static volatile long bytesSent = 0;
     private static volatile String curSrc = "TDMOUT_B";
     private static volatile String lastError = "";
+    /** 最近约 1 秒的采集峰值（0..32767）：用来判断"这个音源到底有没有信号" */
+    private static volatile int lastPeak = 0;
+    private static volatile long peakWindowStart = 0;
 
-    public static synchronized void start(int card, int device) {
-        if (running) return;
+    /**
+     * 启动音频采集。返回 false 表示没起来，原因见 {@link #lastError()}。
+     *
+     * 旧实现不校验 tinycap 是否真的活着：设备被占用（EBUSY）或参数不支持时
+     * tinycap 会立刻退出，但代码以为成功，running 停在 true，
+     * 之后任何 start() 都被开头的 `if (running) return;` 挡掉 —— 音频就再也起不来了。
+     */
+    public static synchronized boolean start(int card, int device) {
+        if (running) return true;
         running = true;
+        lastError = "";
         final String fifo = "/data/local/tmp/audio.fifo";
         try {
             File f = new File(fifo);
@@ -53,13 +64,26 @@ public class AudioStream {
                     "-r", String.valueOf(RATE),
                     "-b", "16"
             });
-            System.out.println("tinycap started, fifo=" + fifo);
         } catch (Throwable t) {
             lastError = "tinycap: " + t;
             System.out.println(lastError);
             running = false;
-            return;
+            return false;
         }
+
+        // 校验 tinycap 真的活着：它打不开设备时会立刻退出，而旧实现对此一无所知
+        try {
+            Thread.sleep(300);
+        } catch (InterruptedException ignored) {
+        }
+        if (!proc.isAlive()) {
+            lastError = "tinycap 启动后立即退出（设备被占用或参数不支持）: " + drainQuietly(proc);
+            System.out.println(lastError);
+            proc = null;
+            running = false;
+            return false;
+        }
+        System.out.println("tinycap started, fifo=" + fifo);
 
         pumpThread = new Thread(() -> {
             byte[] buf = new byte[8192];
@@ -79,6 +103,20 @@ public class AudioStream {
                     }
                     if (off == 0) continue;
                     bytesSent += off;
+                    // 峰值：回答"切到这个音源到底有没有信号"（旧实现没有任何可观测性）
+                    int peak = 0;
+                    for (int i = 0; i + 1 < off; i += 2) {
+                        int v = (short) (((out[i + 1] & 0xff) << 8) | (out[i] & 0xff));
+                        int a = v < 0 ? -v : v;
+                        if (a > peak) peak = a;
+                    }
+                    long nowMs = System.currentTimeMillis();
+                    if (nowMs - peakWindowStart >= 1000) {
+                        lastPeak = peak;
+                        peakWindowStart = nowMs;
+                    } else if (peak > lastPeak) {
+                        lastPeak = peak;
+                    }
                     // 拷贝一份：out 缓冲在下一次 read 时会被覆盖
                     byte[] frame = java.util.Arrays.copyOf(out, off);
                     ClientChannel[] snapshot;
@@ -92,11 +130,17 @@ public class AudioStream {
             } catch (Throwable t) {
                 lastError = "pump: " + t;
                 System.out.println(lastError);
+            } finally {
+                // 泵线程退出（tinycap 死了 / FIFO 断了）必须把状态复位，
+                // 否则 start() 开头的 `if (running) return;` 会让音频永远起不来
+                running = false;
+                lastPeak = 0;
             }
             System.out.println("audio pump end");
         }, "audio-pump");
         pumpThread.setDaemon(true);
         pumpThread.start();
+        return true;
     }
 
     /**
@@ -135,7 +179,14 @@ public class AudioStream {
     public static long bytesSent() { return bytesSent; }
     public static String source() { return curSrc; }
 
-    /** 切换回采来源：改 tinymix 路由 + 重启 tinycap */
+    /**
+     * 切换回采来源：改 tinymix 路由 → 回读校验 → 重启 tinycap。
+     *
+     * 旧实现的三个静默失败（任何一个都会让"换音源没有作用"却仍然回 ok:true）：
+     *   1. `tinymix` 的退出码被丢弃 —— 控件名/取值不对也当成功；
+     *   2. 设完不回读 —— 控件实际没变也不知道；
+     *   3. `start()` 不校验 tinycap 是否活着，且失败后 running 卡在 true。
+     */
     public static synchronized boolean setSource(String name) {
         String ctrl = null, val = null;
         if ("TDMOUT_A".equals(name) || "TDMOUT_B".equals(name) || "TDMOUT_C".equals(name)) {
@@ -144,26 +195,122 @@ public class AudioStream {
                 || "TDMIN_B".equals(name) || "TDMIN_C".equals(name)) {
             ctrl = "Loopback datain source"; val = name;
         }
-        if (ctrl == null) return false;
-        try {
-            Runtime.getRuntime().exec(new String[]{"tinymix", ctrl, val}).waitFor();
-            System.out.println("audio source -> " + ctrl + " = " + val);
-        } catch (Throwable t) {
-            System.out.println("tinymix fail: " + t);
+        if (ctrl == null) {
+            lastError = "未知音源: " + name;
             return false;
         }
-        curSrc = name;
-        // 重启采集，让新路由生效
+
+        // 1. 设置，并检查退出码
+        String r1 = execCapture("tinymix", ctrl, val);
+        if (!r1.startsWith("exit=0")) {
+            lastError = "tinymix \"" + ctrl + "\" \"" + val + "\" 失败 → " + r1;
+            System.out.println(lastError);
+            return false;
+        }
+        // 2. 回读校验：确认控件真的变成了目标值
+        String r2 = execCapture("tinymix", ctrl);
+        if (r2.indexOf(val) < 0) {
+            lastError = "回读不一致，控件没变 → " + r2;
+            System.out.println(lastError);
+            return false;
+        }
+        System.out.println("audio source -> " + ctrl + " = " + val);
+
+        // 3. 重启采集让新路由生效；只有真的起来了才认这个音源
         stop();
-        try { Thread.sleep(400); } catch (InterruptedException ignored) {}
-        start(0, 7);
+        try { Thread.sleep(400); } catch (InterruptedException ignored) { }
+        if (!start(0, 7)) return false;
+        curSrc = name;
         return true;
     }
 
     public static synchronized void stop() {
         running = false;
-        if (proc != null) { try { proc.destroy(); } catch (Throwable ignored) {} proc = null; }
+        Process p = proc;
+        proc = null;
+        if (p != null) {
+            try { p.destroy(); } catch (Throwable ignored) { }
+            try {
+                if (!p.waitFor(1, java.util.concurrent.TimeUnit.SECONDS)) p.destroyForcibly();
+            } catch (Throwable ignored) { }
+        }
+        Thread t = pumpThread;
+        pumpThread = null;
+        if (t != null) {
+            try { t.join(500); } catch (InterruptedException ignored) { }
+        }
+        lastPeak = 0;
     }
+
+    /** 跑一条命令并收集输出，返回 "exit=<code>|<stdout+stderr>"；超时 3 秒 */
+    static String execCapture(String... cmd) {
+        Process p = null;
+        try {
+            ProcessBuilder pb = new ProcessBuilder(cmd);
+            pb.redirectErrorStream(true);
+            p = pb.start();
+            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+            InputStream in = p.getInputStream();
+            long deadline = System.currentTimeMillis() + 3000;
+            boolean exited = false;
+            while (!exited) {
+                drainTo(in, bos);
+                if (!p.isAlive()) {
+                    drainTo(in, bos);           // 进程退出后管道里可能还有残留
+                    exited = true;
+                } else if (System.currentTimeMillis() > deadline) {
+                    p.destroy();
+                    exited = true;
+                } else {
+                    Thread.sleep(10);
+                }
+            }
+            int code;
+            if (p.isAlive()) {
+                code = -2;                      // 超时
+            } else {
+                code = p.waitFor();
+            }
+            return "exit=" + code + "|" + bos.toString("UTF-8").trim();
+        } catch (Throwable t) {
+            return "exit=-1|" + t;
+        }
+    }
+
+    /** 把 InputStream 里当前可读的字节全部倒进 bos（不阻塞） */
+    static void drainTo(InputStream in, java.io.ByteArrayOutputStream bos) {
+        try {
+            byte[] b = new byte[256];
+            while (in.available() > 0) {
+                int n = in.read(b, 0, Math.min(in.available(), b.length));
+                if (n <= 0) break;
+                bos.write(b, 0, n);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** 读掉一个已退出进程的残余输出（用于把 tinycap 的错误原文带进 lastError） */
+    static String drainQuietly(Process p) {
+        try {
+            if (p == null) return "";
+            InputStream in = p.getInputStream();
+            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+            byte[] b = new byte[256];
+            while (in.available() > 0) {
+                int n = in.read(b, 0, Math.min(in.available(), b.length));
+                if (n <= 0) break;
+                bos.write(b, 0, n);
+            }
+            String s = bos.toString("UTF-8").trim();
+            return s.isEmpty() ? "(无输出)" : s;
+        } catch (Throwable t) {
+            return "(读取失败: " + t + ")";
+        }
+    }
+
     public static String lastError() { return lastError; }
     public static boolean isRunning() { return running; }
+    /** 最近约 1 秒的采集峰值，0 表示这个音源当前没有信号 */
+    public static int peak() { return lastPeak; }
 }

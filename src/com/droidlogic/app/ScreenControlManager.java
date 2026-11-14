@@ -446,7 +446,7 @@ public class ScreenControlManager {
       + "  S.textContent='已息屏';"
       + " }else{"
       + "  if(sleeping){sleeping=false;OFF.style.display='none';V.style.display='block';openVideo();}"
-      + "  S.textContent=fps+' fps · '+(j.kbps/1000).toFixed(2)+' Mbps · '+j.w+'×'+j.h+' · 看 '+j.clients;"
+      + "  S.textContent=fps+' fps · '+(j.kbps/1000).toFixed(2)+' Mbps · '+j.w+'×'+j.h+' · 看 '+j.clients+(j.audio?(' · 音峰 '+j.apeak):' · 音频关');"
       + "  D.className=(fps>0)?'dot':'dot bad';"
       + " }"
       + "}).catch(()=>{S.textContent='连不上服务';D.className='dot bad';});}"
@@ -485,7 +485,13 @@ public class ScreenControlManager {
       + " }).catch(()=>{AB.textContent='音频失败';});"
       + "}"
       + "function setaudio(){const s=document.getElementById('asrc').value;"
-      + "fetch('/audio?src='+s).then(r=>r.json()).then(()=>{setTimeout(()=>{if(audioOn)openPcm();},800);}).catch(()=>{});}"
+      + "fetch('/audio?src='+s).then(r=>r.json()).then(j=>{"
+      + "if(!j.ok){AB.textContent='切源失败';AB.title=j.err||'未知错误';console.warn('set audio failed',j);"
+      + "document.getElementById('asrc').value=j.src;return;}"
+      + "AB.textContent=audioOn?'关闭声音':'开启声音';AB.title=j.src+' · peak='+j.peak;"
+      + "document.getElementById('asrc').value=j.src;"
+      + "setTimeout(()=>{if(audioOn)openPcm();},800);"
+      + "}).catch(e=>{AB.textContent='切源失败';AB.title=String(e);});}"
       + "document.addEventListener('dblclick',fs);"
       + "openVideo();"
       + "startAudio();"
@@ -493,6 +499,22 @@ public class ScreenControlManager {
       + "</script></body></html>";
 
     static final String CRLF = new String(new char[]{13, 10});
+
+    /** 最小 JSON 字符串转义（lastError 里可能有引号、路径、换行） */
+    static String jsonEscape(String s) {
+        if (s == null) return "";
+        StringBuilder sb = new StringBuilder(s.length() + 8);
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '"' || c == '\\') sb.append('\\').append(c);
+            else if (c == '\n') sb.append("\\n");
+            else if (c == '\r') sb.append("\\r");
+            else if (c == '\t') sb.append("\\t");
+            else if (c < 0x20) sb.append(' ');
+            else sb.append(c);
+        }
+        return sb.toString();
+    }
 
     static void send(OutputStream out, String ctype, byte[] body, boolean noStore) throws IOException {
         send(out, 200, ctype, body, noStore);
@@ -621,9 +643,18 @@ public class ScreenControlManager {
                 String src = null;
                 int q = path.indexOf("?src=");
                 if (q >= 0) src = path.substring(q + 5);
-                boolean ok = (src != null) && AudioStream.setSource(src);
+                boolean ok;
+                if (src == null) {
+                    ok = true;                       // 不带 src = 只查询当前状态
+                } else {
+                    ok = AudioStream.setSource(src);
+                }
                 send(out, "application/json",
-                        ("{\"ok\":" + ok + ",\"src\":\"" + AudioStream.source() + "\"}")
+                        ("{\"ok\":" + ok
+                                + ",\"src\":\"" + jsonEscape(AudioStream.source()) + "\""
+                                + ",\"run\":" + AudioStream.isRunning()
+                                + ",\"peak\":" + AudioStream.peak()
+                                + ",\"err\":\"" + jsonEscape(AudioStream.lastError()) + "\"}")
                                 .getBytes("UTF-8"), true);
             } else if (path.startsWith("/stats")) {
                 String json = "{\"fps\":" + String.format(java.util.Locale.US, "%.2f", STAT_FPS)
@@ -634,7 +665,9 @@ public class ScreenControlManager {
                         + ",\"audio\":" + AudioStream.isRunning()
                         + ",\"aclients\":" + AudioStream.clientCount()
                         + ",\"abytes\":" + AudioStream.bytesSent()
-                        + ",\"asrc\":\"" + AudioStream.source() + "\""
+                        + ",\"asrc\":\"" + jsonEscape(AudioStream.source()) + "\""
+                        + ",\"apeak\":" + AudioStream.peak()
+                        + ",\"aerr\":\"" + jsonEscape(AudioStream.lastError()) + "\""
                         + ",\"awake\":" + awakeCached() + "}";
                 send(out, "application/json", json.getBytes("UTF-8"), true);
             } else {
