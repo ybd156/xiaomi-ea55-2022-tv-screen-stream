@@ -366,7 +366,96 @@ public class ScreenControlManager {
         startPipeline(1, w, h);
     }
 
-    static final String PAGE =
+    // ---------------- 遥控 ----------------
+
+    /**
+     * 控制端令牌：进程启动时生成，注入网页，控制类端点必须带上。
+     *
+     * 为什么需要：本服务没有鉴权，而 /key 能让任何能访问 8899 的东西操作电视。
+     * 浏览器同源策略能挡住"你访问的恶意网页偷偷发按键"（它读不到本页，也就拿不到令牌）；
+     * 但挡不住局域网里的其它主机——那要靠网络隔离，见 docs/API.md「安全边界」。
+     */
+    static final String TOKEN = initToken();
+
+    /**
+     * 令牌来源：优先 -Dtvss.token=xxx（便于脚本调用），否则随机生成。
+     * **不要把它写进日志或仓库**（AGENTS.md §2.3）；需要时从页面里取，或用 -D 显式指定。
+     */
+    static String initToken() {
+        String t = System.getProperty("tvss.token", "");
+        if (t != null && t.length() >= 4) return t;
+        byte[] b = new byte[6];
+        try {
+            java.security.SecureRandom.getInstance("SHA1PRNG").nextBytes(b);
+        } catch (Throwable x) {
+            new java.util.Random().nextBytes(b);
+        }
+        StringBuilder sb = new StringBuilder();
+        for (byte v : b) sb.append(String.format("%02x", v));
+        return sb.toString();
+    }
+
+    /** 按键白名单：只放遥控器上有的。**不放 POWER**（26 是开关，见 AGENTS.md §2.4） */
+    static final java.util.Map<String, Integer> KEYS = new java.util.HashMap<>();
+    static {
+        KEYS.put("DPAD_UP", 19);       KEYS.put("DPAD_DOWN", 20);
+        KEYS.put("DPAD_LEFT", 21);     KEYS.put("DPAD_RIGHT", 22);
+        KEYS.put("DPAD_CENTER", 23);   KEYS.put("BACK", 4);
+        KEYS.put("HOME", 3);           KEYS.put("MENU", 82);
+        KEYS.put("VOLUME_UP", 24);     KEYS.put("VOLUME_DOWN", 25);
+        KEYS.put("MUTE", 164);         KEYS.put("PLAY_PAUSE", 85);
+        KEYS.put("NEXT", 87);          KEYS.put("PREVIOUS", 88);
+        KEYS.put("ENTER", 66);         KEYS.put("DEL", 67);
+        KEYS.put("SETTINGS", 176);     KEYS.put("TV_INPUT", 178);
+    }
+
+    /** 取查询参数（不做 URL 解码；/key 的取值只允许 [A-Z_]） */
+    static String param(String path, String name) {
+        int q = path.indexOf('?');
+        if (q < 0) return null;
+        for (String kv : path.substring(q + 1).split("&")) {
+            int e = kv.indexOf('=');
+            if (e > 0 && kv.substring(0, e).equals(name)) return kv.substring(e + 1);
+        }
+        return null;
+    }
+
+    static boolean tokenOk(String t) { return TOKEN.equals(t); }
+
+    /** 发一个按键。input 每次 fork 一个进程，约 30–80 ms */
+    static void sendKey(int code) {
+        try {
+            Process p = Runtime.getRuntime().exec(
+                    new String[]{"input", "keyevent", String.valueOf(code)});
+            if (!p.waitFor(2, java.util.concurrent.TimeUnit.SECONDS)) p.destroy();
+        } catch (Throwable t) {
+            System.out.println("keyevent " + code + " fail: " + t);
+        }
+    }
+
+    /** input text 要求空格写成 %s；其余特殊字符直接丢弃，避免被 input 自己解释 */
+    static String forInputText(String s) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < s.length() && sb.length() < 200; i++) {
+            char c = s.charAt(i);
+            if (c == ' ') sb.append("%s");
+            else if (c >= 0x20 && c < 0x7f && c != '"' && c != '\\' && c != '%') sb.append(c);
+        }
+        return sb.toString();
+    }
+
+    static void sendText(String text) {
+        String safe = forInputText(text);
+        if (safe.isEmpty()) return;
+        try {
+            Process p = Runtime.getRuntime().exec(new String[]{"input", "text", safe});
+            if (!p.waitFor(3, java.util.concurrent.TimeUnit.SECONDS)) p.destroy();
+        } catch (Throwable t) {
+            System.out.println("input text fail: " + t);
+        }
+    }
+
+    static final String PAGE_TEMPLATE =
         "<!doctype html><html lang=zh><head><meta charset=utf-8>"
       + "<meta name=viewport content='width=device-width,initial-scale=1,viewport-fit=cover'>"
       + "<title>电视画面</title>"
@@ -388,6 +477,15 @@ public class ScreenControlManager {
       + "#off .t{font-size:16px;color:#9a9aa3}#off .s{font-size:12px;color:#63636b}"
       + "#off button{padding:10px 22px;font-size:15px;border-color:#3a3a46}"
       + "@media(max-width:680px){.stat{display:none}}"
+      + "#rc{position:fixed;right:10px;bottom:10px;display:none;grid-template-columns:repeat(3,60px);gap:6px;"
+      + "background:#141419f2;border:1px solid #2c2c36;border-radius:12px;padding:10px;z-index:9;box-shadow:0 6px 24px #000a}"
+      + "#rc.on{display:grid}"
+      + "#rc button{padding:11px 0;font-size:15px;border-radius:9px;border:1px solid #2c2c36;background:#1e1e26;color:#d7d7dd;cursor:pointer}"
+      + "#rc button:active{background:#2ecc71;color:#0b0b0d}"
+      + "#rc .gap{visibility:hidden}"
+      + "#rc .wide{grid-column:span 3;display:flex;gap:6px}"
+      + "#rc .wide button{flex:0 0 64px}"
+      + "#rc input{flex:1;min-width:0;background:#1e1e26;color:#d7d7dd;border:1px solid #2c2c36;border-radius:7px;padding:8px;font-size:13px}"
       + "</style></head><body>"
       + "<div class=bar><span id=dot class='dot idle'></span><span class=stat id=s1>连接中…</span><span class=sp></span>"
       + "<button id=ab onclick=audio()>关闭声音</button>"
@@ -407,11 +505,26 @@ public class ScreenControlManager {
       + "<option value='1280,720'>1280×720</option>"
       + "<option value='1920,1080'>1920×1080</option>"
       + "</select>"
-      + "<button onclick=fs()>全屏</button><button onclick=shot()>截图</button></div>"
+      + "<button onclick=fs()>全屏</button><button onclick=shot()>截图</button>"
+      + "<button onclick=\"document.getElementById('rc').classList.toggle('on')\">遥控</button></div>"
+      + "<div id=rc>"
+      + "<span class=gap></span><button onclick=\"rc('DPAD_UP')\">▲</button><span class=gap></span>"
+      + "<button onclick=\"rc('DPAD_LEFT')\">◀</button><button onclick=\"rc('DPAD_CENTER')\">OK</button><button onclick=\"rc('DPAD_RIGHT')\">▶</button>"
+      + "<span class=gap></span><button onclick=\"rc('DPAD_DOWN')\">▼</button><span class=gap></span>"
+      + "<button onclick=\"rc('BACK')\">返回</button><button onclick=\"rc('HOME')\">主页</button><button onclick=\"rc('MENU')\">菜单</button>"
+      + "<button onclick=\"rc('VOLUME_DOWN')\">音量−</button><button onclick=\"rc('MUTE')\">静音</button><button onclick=\"rc('VOLUME_UP')\">音量+</button>"
+      + "<div class=wide><input id=txt placeholder=\"输入文字…\" onkeydown=\"if(event.key==='Enter')rcText()\">"
+      + "<button onclick=\"rcText()\">发送</button></div>"
+      + "</div>"
       + "<div class=stage><canvas id=v></canvas>"
       + "<div id=off><div class=t>电视已息屏</div><div class=s>屏幕关闭时无法采集画面（回采的是显示管线）</div>"
       + "<button onclick=pw('/wake')>唤醒电视</button></div></div>"
       + "<script>"
+      + "const TK='__TK__';"
+      + "function rc(c){fetch('/key?code='+c+'&t='+TK).then(r=>r.json()).then(j=>{if(!j.ok){AB.textContent='遥控失败';AB.title=j.err||'';}}).catch(e=>{AB.textContent='遥控失败';AB.title=String(e);});}"
+      + "function rcText(){const i=document.getElementById('txt'),v=i.value;if(!v)return;"
+      + "fetch('/text?s='+encodeURIComponent(v)+'&t='+TK).then(r=>r.json()).then(j=>{"
+      + "if(!j.ok){AB.textContent='输入失败';AB.title=j.err||'';}else{i.value='';}}).catch(e=>{AB.textContent='输入失败';AB.title=String(e);});}"
       + "const V=document.getElementById('v'),CTX=V.getContext('2d'),D=document.getElementById('dot'),S=document.getElementById('s1'),AB=document.getElementById('ab'),OFF=document.getElementById('off');"
       + "let sleeping=false,audioOn=false,ac=null,t0=0,aborter=null,vctl=null,lastFrame=0,fc=0,fps=0,fbuf=new Uint8Array(0);"
       + "function findSeq(a,code,from){for(let i=from;i<a.length-1;i++){if(a[i]===((code>>8)&255)&&a[i+1]===(code&255))return i;}return -1;}"
@@ -498,6 +611,11 @@ public class ScreenControlManager {
       + "document.addEventListener('pointerdown',function(){try{if(ac&&ac.state==='suspended')ac.resume();}catch(e){}},{once:true});"
       + "</script></body></html>";
 
+    /** 每次请求把令牌注入页面（模板本身不变） */
+    static String page() {
+        return PAGE_TEMPLATE.replace("__TK__", TOKEN);
+    }
+
     static final String CRLF = new String(new char[]{13, 10});
 
     /** 最小 JSON 字符串转义（lastError 里可能有引号、路径、换行） */
@@ -523,6 +641,8 @@ public class ScreenControlManager {
     static void send(OutputStream out, int status, String ctype, byte[] body, boolean noStore)
             throws IOException {
         String reason = (status == 200) ? "OK"
+                : (status == 400) ? "Bad Request"
+                : (status == 403) ? "Forbidden"
                 : (status == 503) ? "Service Unavailable" : "Error";
         String head = "HTTP/1.0 " + status + " " + reason + CRLF + "Content-Type: " + ctype + CRLF
                 + (noStore ? ("Cache-Control: no-store" + CRLF) : "")
@@ -656,6 +776,46 @@ public class ScreenControlManager {
                                 + ",\"peak\":" + AudioStream.peak()
                                 + ",\"err\":\"" + jsonEscape(AudioStream.lastError()) + "\"}")
                                 .getBytes("UTF-8"), true);
+            } else if (path.startsWith("/key")) {
+                if (!tokenOk(param(path, "t"))) {
+                    send(out, 403, "application/json",
+                            "{\"ok\":false,\"err\":\"bad or missing token\"}".getBytes("UTF-8"), true);
+                } else {
+                    String code = param(path, "code");
+                    Integer kc = (code == null) ? null : KEYS.get(code);
+                    if (kc == null) {
+                        send(out, 400, "application/json",
+                                ("{\"ok\":false,\"err\":\"unknown code: "
+                                        + jsonEscape(String.valueOf(code)) + "\"}")
+                                        .getBytes("UTF-8"), true);
+                    } else {
+                        sendKey(kc);
+                        send(out, "application/json",
+                                ("{\"ok\":true,\"code\":\"" + code + "\"}").getBytes("UTF-8"), true);
+                    }
+                }
+            } else if (path.startsWith("/text")) {
+                if (!tokenOk(param(path, "t"))) {
+                    send(out, 403, "application/json",
+                            "{\"ok\":false,\"err\":\"bad or missing token\"}".getBytes("UTF-8"), true);
+                } else {
+                    String raw = param(path, "s");
+                    String dec = "";
+                    try {
+                        if (raw != null) dec = java.net.URLDecoder.decode(raw, "UTF-8");
+                    } catch (Throwable ignored) {
+                    }
+                    String safe = forInputText(dec);
+                    if (safe.isEmpty()) {
+                        send(out, 400, "application/json",
+                                "{\"ok\":false,\"err\":\"empty or unsupported text (ASCII only)\"}"
+                                        .getBytes("UTF-8"), true);
+                    } else {
+                        sendText(dec);
+                        send(out, "application/json",
+                                ("{\"ok\":true,\"len\":" + safe.length() + "}").getBytes("UTF-8"), true);
+                    }
+                }
             } else if (path.startsWith("/stats")) {
                 String json = "{\"fps\":" + String.format(java.util.Locale.US, "%.2f", STAT_FPS)
                         + ",\"kbps\":" + String.format(java.util.Locale.US, "%.0f", STAT_KBPS)
@@ -671,7 +831,7 @@ public class ScreenControlManager {
                         + ",\"awake\":" + awakeCached() + "}";
                 send(out, "application/json", json.getBytes("UTF-8"), true);
             } else {
-                send(out, "text/html; charset=utf-8", PAGE.getBytes("UTF-8"), false);
+                send(out, "text/html; charset=utf-8", page().getBytes("UTF-8"), false);
             }
             if (!keepOpen) s.close();
         } catch (Throwable t) {

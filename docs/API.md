@@ -1,12 +1,13 @@
 # HTTP 接口
 
 服务默认监听 `:8899`。**没有鉴权、没有 TLS**，只适合在可信局域网内使用。
+唯一的例外是**遥控端点**（`/key`、`/text`）——它们要求一个控制令牌，见下文「遥控」。
 
 ## 端点总览
 
 | 路径 | 方法 | 内容类型 | 说明 |
 |---|---|---|---|
-| `/` | GET | `text/html` | 网页播放器 |
+| `/` | GET | `text/html` | 网页播放器 + 遥控面板 |
 | `/raw` | GET | `application/octet-stream` | **裸 JPEG 连续流**（无边界头，前端自己找 `FFD8/FFD9`） |
 | `/stream` | GET | `multipart/x-mixed-replace` | 标准 MJPEG，给 VLC / OBS 用 |
 | `/snap` | GET | `image/jpeg` | 单帧快照 |
@@ -16,6 +17,8 @@
 | `/pcm` | GET | `audio/L16;rate=48000;channels=2` | 裸 PCM 音频流（S16LE 交错） |
 | `/wake` | GET | `application/json` | 唤醒电视 |
 | `/sleep` | GET | `application/json` | 让电视息屏 |
+| `/key?code=&t=` | GET | `application/json` | **遥控按键（需令牌）** |
+| `/text?s=&t=` | GET | `application/json` | **输入文字（需令牌）** |
 
 ## `/stats`
 
@@ -123,6 +126,61 @@ GET /sleep → {"awake":false}
 
 浏览器端用 `/raw` 是因为 `<img src>` 播放 MJPEG 长跑会卡死（见
 [PITFALLS P8](PITFALLS.md#p8--浏览器-mjpegimg-src会莫名其妙卡住)）。
+
+## 遥控（`/key`、`/text`）
+
+**这两个端点要求令牌 `t`**，其余端点不要求。
+
+```
+GET /key?code=DPAD_UP&t=<token>
+→ {"ok":true,"code":"DPAD_UP"}
+
+GET /text?s=hello%20world&t=<token>
+→ {"ok":true,"len":11}
+```
+
+| 情况 | 响应 |
+|---|---|
+| 令牌错 / 缺 | `403` + `{"ok":false,"err":"bad or missing token"}` |
+| 未知按键名 | `400` + `{"ok":false,"err":"unknown code: XXX"}` |
+| 文字为空 / 含非 ASCII | `400` + `{"ok":false,"err":"empty or unsupported text (ASCII only)"}` |
+
+### 令牌从哪来
+
+- **默认**：进程启动时随机生成，注入到网页里，网页自己带着用——正常用网页不需要关心它；
+- **固定**：启动时加 `-Dtvss.token=你的令牌`（≥4 字符），方便脚本：
+
+```bash
+adb shell su -c 'CLASSPATH=/data/local/tmp/sc.dex app_process -Dtvss.token=abc123 \
+  -Xmx96m /system/bin com.droidlogic.app.ScreenControlManager serve 1 960 540 8899 960 540 70'
+curl "http://<tv-ip>:8899/key?code=HOME&t=abc123"
+```
+
+- **不要把它写进日志或仓库**（AGENTS.md §2.3）。需要时从页面源码里取：
+  `curl -s http://<tv-ip>:8899/ | grep -o "TK='[a-f0-9]*'"`
+
+### 允许的按键（白名单）
+
+| 名称 | 键码 | 名称 | 键码 |
+|---|---|---|---|
+| `DPAD_UP` / `DOWN` / `LEFT` / `RIGHT` | 19 / 20 / 21 / 22 | `BACK` | 4 |
+| `DPAD_CENTER` | 23 | `HOME` | 3 |
+| `MENU` | 82 | `ENTER` | 66 |
+| `VOLUME_UP` / `VOLUME_DOWN` | 24 / 25 | `MUTE` | 164 |
+| `PLAY_PAUSE` | 85 | `NEXT` / `PREVIOUS` | 87 / 88 |
+| `DEL` | 67 | `SETTINGS` | 176 |
+| `TV_INPUT` | 178 | | |
+
+**`POWER` 故意不在白名单里**：键码 26 是开关不是"唤醒"，盲发会把醒着的电视关掉
+（AGENTS.md §2.4）。电源请走 `/wake` 和 `/sleep`，它们内部先查 `dumpsys power`。
+
+### 安全边界（重要）
+
+令牌能挡住的是**「你访问的恶意网页偷偷按电视」**：跨源页面读不到本页 HTML，也就拿不到令牌；
+没有令牌时，`<img src="http://tv:8899/key?code=HOME">` 这种请求是拦不住的。
+
+令牌**挡不住局域网里的其它主机**——它们可以直接 `curl /` 把令牌读出来。
+真正的边界仍然是网络隔离：不要把这个端口映射到公网。
 
 ## CORS
 
