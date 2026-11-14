@@ -55,10 +55,11 @@ public class AudioStream {
             lastError = "mkfifo: " + t;
             System.out.println(lastError);
         }
-        // 校验 tinycap 真的活着。设备释放有延迟：连续切音源时新 tinycap 常撞 EBUSY
-        // 而立刻退出，所以这里重试 3 次（每次 300ms 存活判定 + 250ms 间隔）。
-        boolean alive = false;
+        // 判定标准是「泵还活着」，不是「tinycap 进程还在」：
+        // tinycap 会先阻塞在打开 FIFO 上（此时进程是活的），等泵把 FIFO 打开之后
+        // 它才去开 PCM 设备，撞 EBUSY 才退出。所以必须等泵起来之后再判一次。
         for (int attempt = 1; attempt <= 3; attempt++) {
+            running = true;
             try {
                 proc = launchTinycap(fifo, card, device);
             } catch (Throwable t) {
@@ -68,26 +69,34 @@ public class AudioStream {
                 lastPeak = 0;
                 return false;
             }
-            try { Thread.sleep(300); } catch (InterruptedException ignored) { }
-            if (proc.isAlive()) {
-                alive = true;
-                break;
+            try { Thread.sleep(250); } catch (InterruptedException ignored) { }
+            if (!proc.isAlive()) {
+                lastError = "tinycap 第 " + attempt + " 次启动后立即退出: " + drainQuietly(proc);
+                System.out.println(lastError);
+                proc = null;
+                running = false;
+                if (attempt < 3) { try { Thread.sleep(300); } catch (InterruptedException ignored) { } }
+                continue;
             }
-            lastError = "tinycap 第 " + attempt + " 次启动后立即退出: " + drainQuietly(proc);
-            System.out.println(lastError);
-            proc = null;
-            if (attempt < 3) {
-                try { Thread.sleep(250); } catch (InterruptedException ignored) { }
+            startPump(fifo);
+            try { Thread.sleep(700); } catch (InterruptedException ignored) { }
+            if (running && proc != null && proc.isAlive()) {
+                System.out.println("tinycap started (attempt " + attempt + "), fifo=" + fifo);
+                return true;
             }
-        }
-        if (!alive) {
-            lastError = "tinycap 连续 3 次启动失败（设备被占用或参数不支持）: " + lastError;
+            String why = (proc != null) ? drainQuietly(proc) : "(进程已退出)";
+            lastError = "tinycap 第 " + attempt + " 次启动后随即退出（泵收到 EOF）: " + why;
             System.out.println(lastError);
-            running = false;
-            lastPeak = 0;
-            return false;
+            stop();
+            if (attempt < 3) { try { Thread.sleep(300); } catch (InterruptedException ignored) { } }
         }
-        System.out.println("tinycap started, fifo=" + fifo);
+        running = false;
+        lastPeak = 0;
+        return false;
+    }
+
+    /** 起采集泵线程：读 FIFO → 8ch 下混 2ch → 投递给各客户端 */
+    static void startPump(final String fifo) {
 
         pumpThread = new Thread(() -> {
             byte[] buf = new byte[8192];
@@ -144,7 +153,6 @@ public class AudioStream {
         }, "audio-pump");
         pumpThread.setDaemon(true);
         pumpThread.start();
-        return true;
     }
 
     /**
