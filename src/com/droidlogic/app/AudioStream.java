@@ -16,7 +16,7 @@ import java.util.List;
 public class AudioStream {
 
     public static final int RATE = 48000;
-    public static final int CH = 2;      // TDM-B 采集端（pcm1c）是 2 声道
+    public static final int CH = 8;      // LOOPBACK-A 是 8 声道，必须按 8 声道抓
     public static final int OUT_CH = 2;  // 下混成 2 声道再发出去
 
     /** 每个音频客户端最多积压的块数 / 字节数（一块约 2 KB，约 94 块/秒） */
@@ -290,7 +290,7 @@ public class AudioStream {
     }
 
     static boolean isDeviceClosed() {
-        try (InputStream in = new FileInputStream("/proc/asound/card0/pcm1c/sub0/hw_params")) {
+        try (InputStream in = new FileInputStream("/proc/asound/card0/pcm7c/sub0/hw_params")) {
             byte[] b = new byte[256];
             int n = in.read(b);
             if (n <= 0) return true;
