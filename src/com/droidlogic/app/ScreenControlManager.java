@@ -774,18 +774,29 @@ public class ScreenControlManager {
                 Thread.sleep(300);
                 send(out, "application/json", ("{\"awake\":" + isAwake() + "}").getBytes("UTF-8"), true);
             } else if (path.startsWith("/audio")) {
-                String src = null;
-                int q = path.indexOf("?src=");
-                if (q >= 0) src = path.substring(q + 5);
+                String be = param(path, "backend");
+                String src = param(path, "src");
                 boolean ok;
-                if (src == null) {
-                    ok = true;                       // 不带 src = 只查询当前状态
+                if (be != null) {
+                    // 切换采集后端：tinycap（ALSA loopback）或 submix（AudioRecord REMOTE_SUBMIX）
+                    if (!"tinycap".equals(be) && !"submix".equals(be)) {
+                        send(out, 400, "application/json",
+                                "{\"ok\":false,\"err\":\"backend 只能是 tinycap 或 submix\"}"
+                                        .getBytes("UTF-8"), true);
+                        return;
+                    }
+                    AudioStream.stop();
+                    AudioStream.setBackend(be);
+                    ok = AudioStream.start(0, 7);
+                } else if (src == null) {
+                    ok = true;                       // 不带参数 = 只查询当前状态
                 } else {
                     ok = AudioStream.setSource(src);
                 }
                 send(out, "application/json",
                         ("{\"ok\":" + ok
                                 + ",\"src\":\"" + jsonEscape(AudioStream.source()) + "\""
+                                + ",\"backend\":\"" + jsonEscape(AudioStream.backend()) + "\""
                                 + ",\"run\":" + AudioStream.isRunning()
                                 + ",\"peak\":" + AudioStream.peak()
                                 + ",\"err\":\"" + jsonEscape(AudioStream.lastError()) + "\"}")
@@ -842,6 +853,7 @@ public class ScreenControlManager {
                         + ",\"asrc\":\"" + jsonEscape(AudioStream.source()) + "\""
                         + ",\"apeak\":" + AudioStream.peak()
                         + ",\"aerr\":\"" + jsonEscape(AudioStream.lastError()) + "\""
+                        + ",\"aback\":\"" + jsonEscape(AudioStream.backend()) + "\""
                         + ",\"awake\":" + awakeCached() + "}";
                 send(out, "application/json", json.getBytes("UTF-8"), true);
             } else {
@@ -858,6 +870,20 @@ public class ScreenControlManager {
     // ---------------- 入口 ----------------
 
     public static void main(String[] args) throws Exception {
+        // 进程被 SIGTERM 杀掉时，先优雅停掉音频采集再退出。
+        // 否则 tinycap 的 ALSA 句柄来不及释放，loopback 设备会卡在"能打开但不产数据"，
+        // 只能重启电视恢复 —— 这正是"每次部署/重启服务都把音频搞坏"的原因。
+        try {
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                try {
+                    AudioStream.stop();
+                    System.out.println("shutdown: audio stopped cleanly");
+                } catch (Throwable t) {
+                    System.out.println("shutdown: audio stop failed: " + t);
+                }
+            }, "audio-shutdown"));
+        } catch (Throwable ignored) {
+        }
         String mode = args.length > 0 ? args[0] : "cap";
         int srcType = args.length > 1 ? Integer.parseInt(args[1]) : 1;
         int w = args.length > 2 ? Integer.parseInt(args[2]) : 1920;

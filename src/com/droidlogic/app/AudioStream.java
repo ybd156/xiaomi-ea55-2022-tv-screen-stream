@@ -1,5 +1,9 @@
 package com.droidlogic.app;
 
+import android.media.AudioFormat;
+import android.media.AudioRecord;
+import android.media.MediaRecorder;
+
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.InputStream;
@@ -37,6 +41,18 @@ public class AudioStream {
     private static volatile boolean stopping = false;
 
     /**
+     * 采集后端：
+     *   "tinycap" —— 走 ALSA（tinycap 写 FIFO），原方案
+     *   "submix"  —— 走 AudioRecord + REMOTE_SUBMIX，抓系统播放（API 28 需 CAPTURE_AUDIO_OUTPUT）
+     * 可用 -Dtvss.audio=submix 指定，也可用 GET /audio?backend=submix 运行时切换。
+     */
+    private static volatile String backend = System.getProperty("tvss.audio", "tinycap");
+    private static AudioRecord submix;
+
+    public static String backend() { return backend; }
+    public static void setBackend(String b) { backend = b; }
+
+    /**
      * 启动音频采集。返回 false 表示没起来，原因见 {@link #lastError()}。
      *
      * 旧实现不校验 tinycap 是否真的活着：设备被占用（EBUSY）或参数不支持时
@@ -45,8 +61,9 @@ public class AudioStream {
      */
     public static synchronized boolean start(int card, int device) {
         if (running) return true;
-        running = true;
         lastError = "";
+        if ("submix".equals(backend)) return startSubmix();
+        running = true;
         final String fifo = "/data/local/tmp/audio.fifo";
         // 每次启动都重建 FIFO：进程内反复 start/stop 时，旧的 FIFO 会残留读写端状态，
         // 累积几次后新 tinycap 和新泵就对不上（表现为 audio=true 但 abytes 不涨）。
@@ -102,6 +119,112 @@ public class AudioStream {
         return false;
     }
 
+    /**
+     * AudioRecord + REMOTE_SUBMIX：直接抓系统播放。
+     * API 28 上需要 CAPTURE_AUDIO_OUTPUT（系统权限）；以 root 跑 app_process 能否通过要实测。
+     */
+    static boolean startSubmix() {
+        running = true;
+        stopping = false;
+        try {
+            int min = AudioRecord.getMinBufferSize(RATE,
+                    AudioFormat.CHANNEL_IN_STEREO, AudioFormat.ENCODING_PCM_16BIT);
+            int bufSize = (min > 0 ? min * 2 : 8192);
+            submix = new AudioRecord(MediaRecorder.AudioSource.REMOTE_SUBMIX,
+                    RATE, AudioFormat.CHANNEL_IN_STEREO, AudioFormat.ENCODING_PCM_16BIT, bufSize);
+            if (submix.getState() != AudioRecord.STATE_INITIALIZED) {
+                lastError = "AudioRecord(REMOTE_SUBMIX) 初始化失败 state=" + submix.getState()
+                        + "（多半是缺 CAPTURE_AUDIO_OUTPUT 权限）";
+                System.out.println(lastError);
+                try { submix.release(); } catch (Throwable ignored) { }
+                submix = null;
+                running = false;
+                lastPeak = 0;
+                return false;
+            }
+            submix.startRecording();
+            if (submix.getRecordingState() != AudioRecord.RECORDSTATE_RECORDING) {
+                lastError = "AudioRecord(REMOTE_SUBMIX) 启动录音失败 state=" + submix.getRecordingState();
+                System.out.println(lastError);
+                try { submix.release(); } catch (Throwable ignored) { }
+                submix = null;
+                running = false;
+                lastPeak = 0;
+                return false;
+            }
+            startSubmixPump(submix);
+            System.out.println("submix capture started (REMOTE_SUBMIX)");
+            return true;
+        } catch (Throwable t) {
+            lastError = "AudioRecord(REMOTE_SUBMIX) 异常: " + t;
+            System.out.println(lastError);
+            try { if (submix != null) submix.release(); } catch (Throwable ignored) { }
+            submix = null;
+            running = false;
+            lastPeak = 0;
+            return false;
+        }
+    }
+
+    static void startSubmixPump(final AudioRecord rec) {
+        pumpThread = new Thread(() -> {
+            short[] buf = new short[2048];
+            byte[] out = new byte[buf.length * 2];
+            try {
+                while (running) {
+                    int n = rec.read(buf, 0, buf.length);
+                    if (n <= 0) {
+                        if (n < 0) { lastError = "AudioRecord.read 返回 " + n; break; }
+                        try { Thread.sleep(10); } catch (InterruptedException ignored) { }
+                        continue;
+                    }
+                    int off = 0;
+                    for (int i = 0; i < n; i++) {
+                        short v = buf[i];
+                        out[off++] = (byte) (v & 0xff);
+                        out[off++] = (byte) ((v >> 8) & 0xff);
+                    }
+                    publish(out, off);
+                }
+            } catch (Throwable t) {
+                lastError = "submix pump: " + t;
+                System.out.println(lastError);
+            } finally {
+                running = false;
+                lastPeak = 0;
+                if (!stopping) System.out.println("submix pump end");
+            }
+        }, "submix-pump");
+        pumpThread.setDaemon(true);
+        pumpThread.start();
+    }
+
+    /** 算峰值 + 投递给所有客户端（tinycap 泵和 submix 泵共用） */
+    static void publish(byte[] pcm, int off) {
+        if (off <= 0) return;
+        bytesSent += off;
+        int peak = 0;
+        for (int i = 0; i + 1 < off; i += 2) {
+            int v = (short) (((pcm[i + 1] & 0xff) << 8) | (pcm[i] & 0xff));
+            int a = v < 0 ? -v : v;
+            if (a > peak) peak = a;
+        }
+        long now = System.currentTimeMillis();
+        if (now - peakWindowStart >= 1000) {
+            lastPeak = peak;
+            peakWindowStart = now;
+        } else if (peak > lastPeak) {
+            lastPeak = peak;
+        }
+        byte[] frame = java.util.Arrays.copyOf(pcm, off);
+        ClientChannel[] snapshot;
+        synchronized (clients) {
+            if (clients.isEmpty()) return;
+            snapshot = clients.toArray(new ClientChannel[0]);
+        }
+        for (ClientChannel ch : snapshot) ch.offer(frame);
+    }
+
     /** 起采集泵线程：读 FIFO → 2ch 直通（CH==2 时就是原样）→ 投递给各客户端 */
     static void startPump(final String fifo) {
 
@@ -122,30 +245,7 @@ public class AudioStream {
                         out[off++] = buf[base + 3];
                     }
                     if (off == 0) continue;
-                    bytesSent += off;
-                    // 峰值：回答"切到这个音源到底有没有信号"（旧实现没有任何可观测性）
-                    int peak = 0;
-                    for (int i = 0; i + 1 < off; i += 2) {
-                        int v = (short) (((out[i + 1] & 0xff) << 8) | (out[i] & 0xff));
-                        int a = v < 0 ? -v : v;
-                        if (a > peak) peak = a;
-                    }
-                    long nowMs = System.currentTimeMillis();
-                    if (nowMs - peakWindowStart >= 1000) {
-                        lastPeak = peak;
-                        peakWindowStart = nowMs;
-                    } else if (peak > lastPeak) {
-                        lastPeak = peak;
-                    }
-                    // 拷贝一份：out 缓冲在下一次 read 时会被覆盖
-                    byte[] frame = java.util.Arrays.copyOf(out, off);
-                    ClientChannel[] snapshot;
-                    synchronized (clients) {
-                        if (clients.isEmpty()) continue;
-                        snapshot = clients.toArray(new ClientChannel[0]);
-                    }
-                    // 不再持锁写 socket：慢端只丢自己的音频，不阻塞泵线程和其他客户端
-                    for (ClientChannel ch : snapshot) ch.offer(frame);
+                    publish(out, off);
                 }
             } catch (Throwable t) {
                 lastError = "pump: " + t;
@@ -276,6 +376,13 @@ public class AudioStream {
     public static synchronized void stop() {
         stopping = true;
         running = false;
+        // 先放掉 AudioRecord（submix 后端）
+        AudioRecord rec = submix;
+        submix = null;
+        if (rec != null) {
+            try { rec.stop(); } catch (Throwable ignored) { }
+            try { rec.release(); } catch (Throwable ignored) { }
+        }
         Process p = proc;
         proc = null;
         if (p != null) {
