@@ -619,7 +619,7 @@ public class ScreenControlManager {
       + "document.getElementById('asrc').value=j.src;"
       + "setTimeout(()=>{if(audioOn)openPcm();},800);"
       + "}).catch(e=>{AB.textContent='切源失败';AB.title=String(e);});}"
-      + "document.addEventListener('dblclick',fs);"
+      + "document.querySelector('.stage').addEventListener('dblclick',fs);"
       + "openVideo();"
       + "startAudio();"
       + "document.addEventListener('pointerdown',function(){try{if(ac&&ac.state==='suspended')ac.resume();}catch(e){}},{once:true});"
