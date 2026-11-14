@@ -97,8 +97,13 @@ GET /audio
 | `SPDIFIN` | `Loopback datain source` | SPDIF 输入 |
 | `TDMIN_A/B/C` | `Loopback datain source` | 内部 TDM 输入 |
 
-切换过程：`tinymix` 改路由 → **回读校验** → 杀掉 `tinycap` → 重启并**校验存活**（约 0.4 秒断音）。
-任何一步失败都会 `ok:false` + `err` 说明原因，`src` 不会更新。
+切换过程：`tinymix` 把**另一路输入先隔离到空闲源**（`TDMIN_C`）→ 再设目标路 → 两路都回读校验。
+任何一步失败都会 `ok:false` + `err` 说明原因，`src` 不会更新。**不重启采集设备**（反复开关会让 loopback 退化）。
+
+> **重要：loopback 是把两路输入相加的。** `Loopback tdmin lb source` 和 `Loopback datain source`
+> 是两个独立控件，旧实现每次只改一路、另一路一直开着，所以听起来"换音源没作用"。
+> 佐证：六个源抓到的字节数完全一样；选 `PDMIN`（麦克风）时居然能采到灌进 TDM-B 播放的测试音
+> ——麦克风不可能采到，只能是两路在相加。现在切源会先把另一路指到空闲的 `TDMIN_C`。
 
 > 2026-11-14 修复：旧实现丢弃 `tinymix` 的退出码、不回读、也不校验 `tinycap` 是否活着，
 > 所以控件名不对、取值不合法、设备被占用这三种情况**全都回 `ok:true`**，

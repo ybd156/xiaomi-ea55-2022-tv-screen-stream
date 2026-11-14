@@ -203,48 +203,72 @@ public class AudioStream {
     public static long bytesSent() { return bytesSent; }
     public static String source() { return curSrc; }
 
+    /** 枚举里没有 off，用空闲的内部 TDM 输入当"关掉这一路"的占位源 */
+    static final String IDLE_SRC = "TDMIN_C";
+
     /**
-     * 切换回采来源：改 tinymix 路由 → 回读校验 → 重启 tinycap。
+     * 切换回采来源。
      *
-     * 旧实现的三个静默失败（任何一个都会让"换音源没有作用"却仍然回 ok:true）：
-     *   1. `tinymix` 的退出码被丢弃 —— 控件名/取值不对也当成功；
-     *   2. 设完不回读 —— 控件实际没变也不知道；
-     *   3. `start()` 不校验 tinycap 是否活着，且失败后 running 卡在 true。
+     * **loopback 是把两路输入相加的**：`Loopback tdmin lb source` 和
+     * `Loopback datain source` 是两个独立控件，旧实现每次只改一路，另一路一直开着，
+     * 所以听起来"换音源没作用"（改了一路，另一路的声音还在）。
+     * 实测佐证：六个源抓到的字节数完全一样；选 PDMIN(麦克风) 时居然能采到
+     * 灌进 TDM-B 播放的测试音——麦克风不可能采到，只能是两路在相加。
+     *
+     * 现在改成：先把另一路指到空闲源（隔离），再设目标路，两路都回读校验。
      */
     public static synchronized boolean setSource(String name) {
-        String ctrl = null, val = null;
+        String ctrl = null, val = null, otherCtrl = null;
         if ("TDMOUT_A".equals(name) || "TDMOUT_B".equals(name) || "TDMOUT_C".equals(name)) {
             ctrl = "Loopback tdmin lb source"; val = name;
+            otherCtrl = "Loopback datain source";
         } else if ("PDMIN".equals(name) || "SPDIFIN".equals(name) || "TDMIN_A".equals(name)
                 || "TDMIN_B".equals(name) || "TDMIN_C".equals(name)) {
             ctrl = "Loopback datain source"; val = name;
+            otherCtrl = "Loopback tdmin lb source";
         }
         if (ctrl == null) {
             lastError = "未知音源: " + name;
             return false;
         }
 
-        // 1. 设置，并检查退出码
+        // 1. 先把另一路隔离到空闲源（除非目标本身就是那个空闲源）
+        if (otherCtrl != null && !IDLE_SRC.equals(name)) {
+            String ro = execCapture("tinymix", otherCtrl, IDLE_SRC);
+            if (!ro.startsWith("exit=0")) {
+                lastError = "tinymix \"" + otherCtrl + "\" \"" + IDLE_SRC + "\" 失败 → " + ro;
+                System.out.println(lastError);
+                return false;
+            }
+            System.out.println("audio source -> " + otherCtrl + " = " + IDLE_SRC + "（隔离另一路）");
+        }
+
+        // 2. 设目标路，并检查退出码
         String r1 = execCapture("tinymix", ctrl, val);
         if (!r1.startsWith("exit=0")) {
             lastError = "tinymix \"" + ctrl + "\" \"" + val + "\" 失败 → " + r1;
             System.out.println(lastError);
             return false;
         }
-        // 2. 回读校验：确认控件真的变成了目标值
+        // 3. 回读两路，确认都到位
         String r2 = execCapture("tinymix", ctrl);
         if (r2.indexOf(val) < 0) {
-            lastError = "回读不一致，控件没变 → " + r2;
+            lastError = "回读不一致，目标路没变 → " + r2;
             System.out.println(lastError);
             return false;
         }
+        if (otherCtrl != null && !IDLE_SRC.equals(name)) {
+            String r3 = execCapture("tinymix", otherCtrl);
+            if (r3.indexOf(IDLE_SRC) < 0) {
+                lastError = "回读不一致，隔离路没变 → " + r3;
+                System.out.println(lastError);
+                return false;
+            }
+        }
         System.out.println("audio source -> " + ctrl + " = " + val);
 
-        // 只改 mixer，**不重启 tinycap**。
-        // 实测：6 个源采到的字节数完全一样（65536 B / period），说明这个控件并不改变
-        // 设备 7 的内容；而每切一次就 stop/start 一次，反复开关 ALSA 设备会让 loopback
-        // 退化到"能打开但不产数据"，只能重启电视恢复。所以这里不做重启。
-        // 如果将来确认某个源确实需要重开设备才能生效，再单独加"显式重开"的入口。
+        // 只改 mixer，不重启 tinycap：反复开关 ALSA 设备会让 loopback 退化到
+        // "能打开但不产数据"，只能重启电视恢复。
         curSrc = name;
         return true;
     }
