@@ -32,6 +32,8 @@ public class AudioStream {
     /** 最近约 1 秒的采集峰值（0..32767）：用来判断"这个音源到底有没有信号" */
     private static volatile int lastPeak = 0;
     private static volatile long peakWindowStart = 0;
+    /** 是否是我们主动 stop()：用于区分"正常切源"和"采集意外中断" */
+    private static volatile boolean stopping = false;
 
     /**
      * 启动音频采集。返回 false 表示没起来，原因见 {@link #lastError()}。
@@ -60,6 +62,7 @@ public class AudioStream {
         // 它才去开 PCM 设备，撞 EBUSY 才退出。所以必须等泵起来之后再判一次。
         for (int attempt = 1; attempt <= 3; attempt++) {
             running = true;
+            stopping = false;
             try {
                 proc = launchTinycap(fifo, card, device);
             } catch (Throwable t) {
@@ -148,6 +151,11 @@ public class AudioStream {
                 // 否则 start() 开头的 `if (running) return;` 会让音频永远起不来
                 running = false;
                 lastPeak = 0;
+                if (!stopping) {
+                    // 不是我们主动停的 → 采集是中途断掉的，必须留个原因给 /stats 的 aerr
+                    lastError = "采集中断（tinycap 已退出或 FIFO 断流）";
+                    System.out.println(lastError);
+                }
             }
             System.out.println("audio pump end");
         }, "audio-pump");
@@ -237,6 +245,7 @@ public class AudioStream {
     }
 
     public static synchronized void stop() {
+        stopping = true;
         running = false;
         Process p = proc;
         proc = null;
