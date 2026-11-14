@@ -24,8 +24,12 @@ public class H264Stream {
 
     private static final int TIMEOUT_US = 10000;
 
+    /** 每个 /ts 客户端最多积压的块数 / 字节数（块大小随编码输出变化） */
+    private static final int QUEUE_FRAMES = 32;
+    private static final long QUEUE_BYTES = 512 * 1024;
+
     private final int w, h, fps, bitrate, port;
-    private final List<Socket> clients = new ArrayList<>();
+    private final List<ClientChannel> clients = new ArrayList<>();
     private volatile boolean running = true;
     private volatile byte[] csd0;      // SPS/PPS（Annex-B）
 
@@ -92,19 +96,15 @@ public class H264Stream {
             try (InputStream in = new ParcelFileDescriptor.AutoCloseInputStream(pipe[0])) {
                 int n;
                 while ((n = in.read(buf)) > 0) {
+                    // 拷贝一份：buf 在下一次 read 时会被覆盖
+                    byte[] chunk = java.util.Arrays.copyOf(buf, n);
+                    ClientChannel[] snapshot;
                     synchronized (clients) {
-                        for (int i = clients.size() - 1; i >= 0; i--) {
-                            Socket s = clients.get(i);
-                            try {
-                                OutputStream o = s.getOutputStream();
-                                o.write(buf, 0, n);
-                                o.flush();
-                            } catch (Throwable t) {
-                                clients.remove(i);
-                                try { s.close(); } catch (Throwable ignored) {}
-                            }
-                        }
+                        if (clients.isEmpty()) continue;
+                        snapshot = clients.toArray(new ClientChannel[0]);
                     }
+                    // 不持锁写 socket：慢端只丢自己的数据，不阻塞编码和推流
+                    for (ClientChannel ch : snapshot) ch.offer(chunk);
                 }
             } catch (Throwable t) {
                 System.out.println("pump end: " + t);
@@ -212,11 +212,19 @@ public class H264Stream {
                 System.out.printf("H264STAT fps=%.1f kbps=%.0f clients=%d%n",
                         frames * 1000.0 / (now - statStart),
                         bytes * 8 / 1000.0 / ((now - statStart) / 1000.0),
-                        clients.size());
+                        clientCount());
                 frames = 0;
                 bytes = 0;
                 statStart = now;
             }
+        }
+    }
+
+    private int clientCount() {
+        synchronized (clients) {
+            int n = 0;
+            for (ClientChannel c : clients) if (!c.isClosed()) n++;
+            return n;
         }
     }
 
@@ -256,8 +264,16 @@ public class H264Stream {
                         + "Cache-Control: no-store\r\n"
                         + "Connection: close\r\n\r\n").getBytes("ISO-8859-1"));
                 out.flush();
-                synchronized (clients) { clients.add(s); }
-                System.out.println("client connected, total=" + clients.size());
+                ClientChannel ch = new ClientChannel(s, out, ClientChannel.RAW, "ts",
+                        QUEUE_FRAMES, QUEUE_BYTES);
+                synchronized (clients) {
+                    for (int i = clients.size() - 1; i >= 0; i--) {
+                        if (clients.get(i).isClosed()) clients.remove(i);
+                    }
+                    clients.add(ch);
+                }
+                ch.start();          // 必须在响应头之后起写线程
+                System.out.println("client connected, total=" + clientCount());
             } else {
                 String ip = getLocalIp();
                 String html = "<html><head><meta charset=\"utf-8\"><title>TV H.264</title></head>"

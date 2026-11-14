@@ -18,7 +18,11 @@ public class AudioStream {
     public static final int CH = 8;      // TDM-B 是 8 声道，必须按 8 声道抓
     public static final int OUT_CH = 2;  // 下混成 2 声道再发出去
 
-    private static final List<Socket> clients = new ArrayList<>();
+    /** 每个音频客户端最多积压的块数 / 字节数（一块约 2 KB，约 94 块/秒） */
+    private static final int QUEUE_FRAMES = 32;
+    private static final long QUEUE_BYTES = 64 * 1024;
+
+    private static final List<ClientChannel> clients = new ArrayList<>();
     private static volatile boolean running = false;
     private static Process proc;
     private static Thread pumpThread;
@@ -75,19 +79,15 @@ public class AudioStream {
                     }
                     if (off == 0) continue;
                     bytesSent += off;
+                    // 拷贝一份：out 缓冲在下一次 read 时会被覆盖
+                    byte[] frame = java.util.Arrays.copyOf(out, off);
+                    ClientChannel[] snapshot;
                     synchronized (clients) {
-                        for (int i = clients.size() - 1; i >= 0; i--) {
-                            Socket s = clients.get(i);
-                            try {
-                                OutputStream o = s.getOutputStream();
-                                o.write(out, 0, off);
-                                o.flush();
-                            } catch (Throwable t) {
-                                clients.remove(i);
-                                try { s.close(); } catch (Throwable ignored) {}
-                            }
-                        }
+                        if (clients.isEmpty()) continue;
+                        snapshot = clients.toArray(new ClientChannel[0]);
                     }
+                    // 不再持锁写 socket：慢端只丢自己的音频，不阻塞泵线程和其他客户端
+                    for (ClientChannel ch : snapshot) ch.offer(frame);
                 }
             } catch (Throwable t) {
                 lastError = "pump: " + t;
@@ -99,20 +99,37 @@ public class AudioStream {
         pumpThread.start();
     }
 
-    public static void addClient(Socket s) {
+    /**
+     * 注册音频客户端。
+     *
+     * 策略不变：**只保留最新一个**（见 docs/API.md「aclients 上限 1」）。
+     * 变的是发送方式：旧实现在泵线程里持有 clients 锁逐个同步写 socket，
+     * 一个不读数据的客户端会锁死整个音频泵（所有人一起没声音）；
+     * 现在每端一个有界队列 + 独立写线程，慢端只丢自己的音频。
+     *
+     * 必须在 HTTP 响应头写完之后调用，否则写线程可能抢在响应头之前发数据。
+     */
+    public static void addClient(Socket s, OutputStream out) {
+        ClientChannel ch = new ClientChannel(s, out, ClientChannel.RAW, "pcm",
+                QUEUE_FRAMES, QUEUE_BYTES);
+        List<ClientChannel> old = new ArrayList<>();
         synchronized (clients) {
-            while (!clients.isEmpty()) {
-                Socket old = clients.remove(0);
-                try { old.close(); } catch (Throwable ignored) {}
-                System.out.println("audio: dropped old client");
-            }
-            clients.add(s);
+            old.addAll(clients);
+            clients.clear();
+            clients.add(ch);
         }
-        System.out.println("audio client connected, total=" + clients.size());
+        for (ClientChannel c : old) c.close();
+        if (!old.isEmpty()) System.out.println("audio: dropped old client");
+        ch.start();
+        System.out.println("audio client connected, total=" + clientCount());
     }
 
     public static int clientCount() {
-        synchronized (clients) { return clients.size(); }
+        synchronized (clients) {
+            int n = 0;
+            for (ClientChannel c : clients) if (!c.isClosed()) n++;
+            return n;
+        }
     }
 
     public static long bytesSent() { return bytesSent; }

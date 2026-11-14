@@ -145,6 +145,62 @@ public class ScreenControlManager {
     static final java.util.concurrent.atomic.AtomicInteger STREAM_CLIENTS =
             new java.util.concurrent.atomic.AtomicInteger();
     static int clientCount() { return STREAM_CLIENTS.get(); }
+
+    // ---- 视频客户端注册表：每端一个有界队列，慢端只丢自己的帧 ----
+
+    /** 同时在线的视频流客户端上限（防止线程/内存被耗光） */
+    static final int MAX_VIDEO_CLIENTS = 8;
+    /** 每个客户端最多积压的帧数；超过就丢最旧的（直播场景旧帧没有价值） */
+    static final int VIDEO_QUEUE_FRAMES = 3;
+    /** 每个客户端的积压字节上限，与帧数上限先到先算 */
+    static final long VIDEO_QUEUE_BYTES = 512 * 1024;
+
+    static final java.util.List<ClientChannel> VIDEO_CHANNELS = new java.util.ArrayList<>();
+
+    /** 注册视频客户端；已满返回 false（调用方负责回 503） */
+    static boolean registerVideoClient(ClientChannel ch) {
+        synchronized (VIDEO_CHANNELS) {
+            for (int i = VIDEO_CHANNELS.size() - 1; i >= 0; i--) {
+                if (VIDEO_CHANNELS.get(i).isClosed()) VIDEO_CHANNELS.remove(i);
+            }
+            if (VIDEO_CHANNELS.size() >= MAX_VIDEO_CLIENTS) return false;
+            VIDEO_CHANNELS.add(ch);
+            return true;
+        }
+    }
+
+    /** 把最新一帧投递给所有客户端。offer() 不阻塞，慢端自己丢帧，不影响采集/编码 */
+    static void broadcastJpeg(byte[] jpg) {
+        ClientChannel[] snapshot;
+        synchronized (VIDEO_CHANNELS) {
+            if (VIDEO_CHANNELS.isEmpty()) return;
+            snapshot = VIDEO_CHANNELS.toArray(new ClientChannel[0]);
+        }
+        for (ClientChannel ch : snapshot) ch.offer(jpg);
+    }
+
+    /**
+     * 等客户端断开（读到 EOF）或超时。
+     *
+     * 为什么由处理线程读而不是让写线程自己发现：写线程只在有帧可写时才会撞到写异常，
+     * 一旦编码停摆（息屏 / 采集失败），已断开的连接会一直占着客户端名额。
+     * 本服务的流式端点客户端不会发任何数据，所以这里 read() 只可能等到 EOF 或超时。
+     * socket 已设 soTimeout=5s，read 不会永久阻塞。
+     */
+    static void waitForPeerClose(InputStream in, ClientChannel ch, long maxMs) {
+        long deadline = System.currentTimeMillis() + maxMs;
+        byte[] sink = new byte[256];
+        while (System.currentTimeMillis() < deadline && !ch.isClosed()) {
+            try {
+                if (in.read(sink) < 0) return;                  // 对端 FIN
+            } catch (java.net.SocketTimeoutException te) {
+                // 5 秒没有数据是正常情况，继续等
+            } catch (Throwable t) {
+                return;                                          // 连接已坏
+            }
+        }
+    }
+
     static volatile byte[] latestJpeg;
     static volatile long latestSeq;
     static volatile int capFps10; // 最近一次统计的帧率 x10
@@ -220,8 +276,10 @@ public class ScreenControlManager {
                     src.copyPixelsFromBuffer(ByteBuffer.wrap(buf));
                     ByteArrayOutputStream bos = new ByteArrayOutputStream(256 * 1024);
                     src.compress(Bitmap.CompressFormat.JPEG, quality, bos);
-                    latestJpeg = bos.toByteArray();
+                    byte[] jpg = bos.toByteArray();
+                    latestJpeg = jpg;
                     latestSeq++;
+                    broadcastJpeg(jpg);   // 只投递引用，不复制；各客户端自己排队
                     okFrames++;
                     STAT_FRAMES++;
                 } catch (Throwable t) {
@@ -241,6 +299,9 @@ public class ScreenControlManager {
                     windowStart = now;
                 }
             }
+            // 本代 Bitmap 只被本线程使用，线程退出即释放。
+            // 旧实现在每次 /set 后都泄漏 w*h*4 字节（1080p 约 8.3 MB，-Xmx96m 下十几次即可 OOM）
+            src.recycle();
             System.out.println("encode thread gen=" + gen + " exit");
         }, "enc");
 
@@ -434,7 +495,14 @@ public class ScreenControlManager {
     static final String CRLF = new String(new char[]{13, 10});
 
     static void send(OutputStream out, String ctype, byte[] body, boolean noStore) throws IOException {
-        String head = "HTTP/1.0 200 OK" + CRLF + "Content-Type: " + ctype + CRLF
+        send(out, 200, ctype, body, noStore);
+    }
+
+    static void send(OutputStream out, int status, String ctype, byte[] body, boolean noStore)
+            throws IOException {
+        String reason = (status == 200) ? "OK"
+                : (status == 503) ? "Service Unavailable" : "Error";
+        String head = "HTTP/1.0 " + status + " " + reason + CRLF + "Content-Type: " + ctype + CRLF
                 + (noStore ? ("Cache-Control: no-store" + CRLF) : "")
                 + "Content-Length: " + body.length + CRLF + CRLF;
         out.write(head.getBytes("ISO-8859-1"));
@@ -458,43 +526,56 @@ public class ScreenControlManager {
             OutputStream out = s.getOutputStream();
 
             if (path.startsWith("/stream")) {
-                wasStream = true;
-                STREAM_CLIENTS.incrementAndGet();
-                String head = "HTTP/1.0 200 OK" + CRLF
-                        + "Cache-Control: no-store" + CRLF
-                        + "Connection: close" + CRLF
-                        + "Content-Type: multipart/x-mixed-replace; boundary=frame" + CRLF + CRLF;
-                out.write(head.getBytes("ISO-8859-1"));
-                long last = -1;
-                long deadline = System.currentTimeMillis() + 30 * 60 * 1000L;
-                while (System.currentTimeMillis() < deadline) {
-                    byte[] jpg = latestJpeg;
-                    long seq = latestSeq;
-                    if (jpg == null || seq == last) { Thread.sleep(15); continue; }
-                    last = seq;
-                    out.write(("--frame" + CRLF + "Content-Type: image/jpeg" + CRLF
-                            + "Content-Length: " + jpg.length + CRLF + CRLF).getBytes("ISO-8859-1"));
-                    out.write(jpg);
-                    out.write(CRLF.getBytes("ISO-8859-1"));
-                    out.flush();
+                ClientChannel.FrameFormat multipart = (o, f) -> {
+                    o.write(("--frame" + CRLF + "Content-Type: image/jpeg" + CRLF
+                            + "Content-Length: " + f.length + CRLF + CRLF).getBytes("ISO-8859-1"));
+                    o.write(f);
+                    o.write(CRLF.getBytes("ISO-8859-1"));
+                };
+                ClientChannel ch = new ClientChannel(s, out, multipart, "mjpeg",
+                        VIDEO_QUEUE_FRAMES, VIDEO_QUEUE_BYTES);
+                if (!registerVideoClient(ch)) {
+                    send(out, 503, "text/plain; charset=utf-8",
+                            ("too many viewers (max " + MAX_VIDEO_CLIENTS + ")\n").getBytes("UTF-8"), true);
+                    ch.close();
+                } else {
+                    wasStream = true;
+                    STREAM_CLIENTS.incrementAndGet();
+                    try {
+                        out.write(("HTTP/1.0 200 OK" + CRLF
+                                + "Cache-Control: no-store" + CRLF
+                                + "Connection: close" + CRLF
+                                + "Content-Type: multipart/x-mixed-replace; boundary=frame" + CRLF + CRLF)
+                                .getBytes("ISO-8859-1"));
+                        out.flush();
+                        ch.start();                       // 必须在响应头之后起写线程
+                        waitForPeerClose(in, ch, 30 * 60 * 1000L);   // 与原实现一致的 30 分钟上限
+                    } finally {
+                        ch.close();                       // 任何异常路径都要释放名额
+                    }
                 }
             } else if (path.startsWith("/raw")) {
-                wasStream = true;
-                STREAM_CLIENTS.incrementAndGet();
-                String head = "HTTP/1.0 200 OK" + CRLF
-                        + "Cache-Control: no-store" + CRLF
-                        + "Connection: close" + CRLF
-                        + "Content-Type: application/octet-stream" + CRLF + CRLF;
-                out.write(head.getBytes("ISO-8859-1"));
-                long last = -1;
-                long deadline = System.currentTimeMillis() + 30 * 60 * 1000L;
-                while (System.currentTimeMillis() < deadline) {
-                    byte[] jpg = latestJpeg;
-                    long seq = latestSeq;
-                    if (jpg == null || seq == last) { Thread.sleep(10); continue; }
-                    last = seq;
-                    out.write(jpg);
-                    out.flush();
+                ClientChannel ch = new ClientChannel(s, out, ClientChannel.RAW, "raw",
+                        VIDEO_QUEUE_FRAMES, VIDEO_QUEUE_BYTES);
+                if (!registerVideoClient(ch)) {
+                    send(out, 503, "text/plain; charset=utf-8",
+                            ("too many viewers (max " + MAX_VIDEO_CLIENTS + ")\n").getBytes("UTF-8"), true);
+                    ch.close();
+                } else {
+                    wasStream = true;
+                    STREAM_CLIENTS.incrementAndGet();
+                    try {
+                        out.write(("HTTP/1.0 200 OK" + CRLF
+                                + "Cache-Control: no-store" + CRLF
+                                + "Connection: close" + CRLF
+                                + "Content-Type: application/octet-stream" + CRLF + CRLF)
+                                .getBytes("ISO-8859-1"));
+                        out.flush();
+                        ch.start();
+                        waitForPeerClose(in, ch, 30 * 60 * 1000L);
+                    } finally {
+                        ch.close();
+                    }
                 }
             } else if (path.startsWith("/snap")) {
                 byte[] jpg = latestJpeg;
@@ -526,7 +607,7 @@ public class ScreenControlManager {
                         + "Connection: close" + CRLF + CRLF;
                 out.write(head.getBytes("ISO-8859-1"));
                 out.flush();
-                AudioStream.addClient(s);
+                AudioStream.addClient(s, out);
                 keepOpen = true;
             } else if (path.startsWith("/wake")) {
                 wakeUp();
