@@ -47,12 +47,13 @@ public class AudioStream {
         running = true;
         lastError = "";
         final String fifo = "/data/local/tmp/audio.fifo";
+        // 每次启动都重建 FIFO：进程内反复 start/stop 时，旧的 FIFO 会残留读写端状态，
+        // 累积几次后新 tinycap 和新泵就对不上（表现为 audio=true 但 abytes 不涨）。
+        // run_srv.sh 启动时那句 `rm -f audio.fifo` 正是同一个道理。
         try {
-            File f = new File(fifo);
-            if (!f.exists()) {
-                Process p = Runtime.getRuntime().exec(new String[]{"sh", "-c", "mkfifo " + fifo});
-                p.waitFor();
-            }
+            new File(fifo).delete();
+            Process p = Runtime.getRuntime().exec(new String[]{"sh", "-c", "mkfifo " + fifo});
+            p.waitFor();
         } catch (Throwable t) {
             lastError = "mkfifo: " + t;
             System.out.println(lastError);
@@ -238,10 +239,11 @@ public class AudioStream {
         }
         System.out.println("audio source -> " + ctrl + " = " + val);
 
-        // 3. 重启采集让新路由生效；只有真的起来了才认这个音源
-        stop();
-        try { Thread.sleep(400); } catch (InterruptedException ignored) { }
-        if (!start(0, 7)) return false;
+        // 只改 mixer，**不重启 tinycap**。
+        // 实测：6 个源采到的字节数完全一样（65536 B / period），说明这个控件并不改变
+        // 设备 7 的内容；而每切一次就 stop/start 一次，反复开关 ALSA 设备会让 loopback
+        // 退化到"能打开但不产数据"，只能重启电视恢复。所以这里不做重启。
+        // 如果将来确认某个源确实需要重开设备才能生效，再单独加"显式重开"的入口。
         curSrc = name;
         return true;
     }
