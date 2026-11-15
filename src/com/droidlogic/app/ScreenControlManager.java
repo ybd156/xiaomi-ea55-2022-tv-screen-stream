@@ -278,6 +278,19 @@ public class ScreenControlManager {
                     try { Thread.sleep(300); } catch (InterruptedException ignored) { }
                     System.exit(1);
                 }
+                if (restarts >= 2) {
+                    // 第二次还卡，说明是厂商 screencontrol 守护进程自己僵住了
+                    // （native_ScreenCapBuffer 永不返回）。杀掉它，系统会自动重新拉起，
+                    // 实测这样能恢复画面，不用重启电视。
+                    System.out.println("看门狗：重启 screencontrol 守护进程");
+                    try {
+                        Process p = Runtime.getRuntime().exec(new String[]{"killall", "screencontrol"});
+                        p.waitFor(3, java.util.concurrent.TimeUnit.SECONDS);
+                    } catch (Throwable ex) {
+                        System.out.println("看门狗：killall screencontrol 失败: " + ex);
+                    }
+                    try { Thread.sleep(3000); } catch (InterruptedException ignored) { }
+                }
                 System.out.println("看门狗：重启采集管线（第 " + restarts + " 次）");
                 startPipeline(CUR_SRC_TYPE, CUR_W, CUR_H);
                 lastChange = System.currentTimeMillis();
