@@ -213,6 +213,7 @@ public class ScreenControlManager {
         CUR_W = w;
         CUR_H = h;
         startPipeline(srcType, w, h);
+        startWatchdog();
 
         // 采 LOOPBACK-A（device 7, 8 声道）：这是原仓库的配置，实测音峰 ~100+；
         // 改采 TDM-B 采集端（device 1, 2ch）后音峰掉到 4，是错误的方向，已改回。
@@ -231,6 +232,62 @@ public class ScreenControlManager {
     /** 起一套采集+编码线程；调用时旧的一代线程会自动退出 */
     /** 当前这一代的采集线程（用于起新管线前等它真正退出） */
     static volatile Thread CUR_CAP_THREAD;
+    /** 当前采集参数（看门狗重启管线时要用） */
+    static volatile int CUR_SRC_TYPE = 1;
+
+    /**
+     * 采集看门狗：帧数 30 秒不涨（且屏幕是亮的）就判定卡住，
+     * 先打印采集线程的调用栈（用来定位到底卡在哪个函数），再自动重启管线。
+     * 10 分钟内连续 3 次卡住就退出进程，让 Magisk 的看门狗脚本把服务整个重启。
+     */
+    static void startWatchdog() {
+        Thread t = new Thread(() -> {
+            long lastFrames = -1;
+            long lastChange = System.currentTimeMillis();
+            long lastRestart = 0;
+            int restarts = 0;
+            while (true) {
+                try { Thread.sleep(10000); } catch (InterruptedException ignored) { }
+                long f = STAT_FRAMES;
+                long now = System.currentTimeMillis();
+                if (f != lastFrames) {
+                    lastFrames = f;
+                    lastChange = now;
+                    continue;
+                }
+                if (now - lastChange < 30000) continue;
+                if (!awakeCached()) continue;      // 息屏时本来就没帧，别误判
+                System.out.println("看门狗：30 秒没有新帧，判定采集卡住");
+                Thread cap = CUR_CAP_THREAD;
+                if (cap != null) {
+                    StackTraceElement[] st = cap.getStackTrace();
+                    System.out.println("采集线程栈（" + st.length + " 帧）：");
+                    for (int i = 0; i < st.length && i < 20; i++) {
+                        System.out.println("  at " + st[i]);
+                    }
+                }
+                if (now - lastRestart < 10 * 60 * 1000L) {
+                    restarts++;
+                } else {
+                    restarts = 1;
+                }
+                lastRestart = now;
+                if (restarts >= 3) {
+                    System.out.println("看门狗：10 分钟内第 " + restarts
+                            + " 次卡住，退出进程让脚本重启服务");
+                    try { Thread.sleep(300); } catch (InterruptedException ignored) { }
+                    System.exit(1);
+                }
+                System.out.println("看门狗：重启采集管线（第 " + restarts + " 次）");
+                startPipeline(CUR_SRC_TYPE, CUR_W, CUR_H);
+                lastChange = System.currentTimeMillis();
+                lastFrames = STAT_FRAMES;
+            }
+        }, "watchdog");
+        t.setDaemon(true);
+        t.start();
+    }
+
 
     /**
      * 起一套采集+编码线程。
@@ -242,6 +299,7 @@ public class ScreenControlManager {
      * 加 synchronized 也防止两次 /set 并发进来各起一套。
      */
     static synchronized void startPipeline(final int srcType, final int w, final int h) {
+        CUR_SRC_TYPE = srcType;
         final int gen = ++GEN;
         Thread old = CUR_CAP_THREAD;
         if (old != null && old.isAlive()) {
