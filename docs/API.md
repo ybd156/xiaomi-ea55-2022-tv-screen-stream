@@ -38,7 +38,10 @@
   "aerr": "",
   "awake": true,
   "idle": false,
-  "idleMs": 30000
+  "idleMs": 30000,
+  "inject": "inputmanager",
+  "injectOk": 128,
+  "injectFallback": 0
 }
 ```
 
@@ -58,6 +61,9 @@
 | `awake` | 电视是否醒着（`dumpsys power`，2 秒缓存） |
 | `idle` | **采集是否因无人观看而暂停**（见下节） |
 | `idleMs` | 空闲判定阈值（毫秒），默认 30000；`0` 表示该功能关闭 |
+| `inject` | 按键注入通道：`uninit`（还没按过）/ `inputmanager`（正常）/ `failed`（退回 `input` 子进程） |
+| `injectOk` | 走 `InputManager` 成功注入的次数 |
+| `injectFallback` | 退回 `input` 子进程的次数；**长期非 0 说明快速通道有问题** |
 
 > `awake=false` 时画面一定是黑的（显示管线停了），但 `fps` 仍会跳动——那是黑帧。
 
@@ -163,6 +169,18 @@ GET /text?s=hello%20world&t=<token>
 | 令牌错 / 缺 | `403` + `{"ok":false,"err":"bad or missing token"}` |
 | 未知按键名 | `400` + `{"ok":false,"err":"unknown code: XXX"}` |
 | 文字为空 / 含非 ASCII | `400` + `{"ok":false,"err":"empty or unsupported text (ASCII only)"}` |
+
+### 注入通道（2026-11-21 起）
+
+按键走 `InputManager.injectInputEvent`（反射调用，一次 binder，实测 1–3 ms），**不再 fork `input` 子进程**——
+`/system/bin/input` 每次都要新起一个 ART 虚拟机，在这台电视上实测 **846 ms/次**（`input --help` 纯启动 838 ms），
+连按还会各起一个 JVM 互相抢核（5 连按共 1.43 s）。
+
+拿不到隐藏 API 或没有 `INJECT_EVENTS` 权限时自动退回 `input keyevent`，但**不再 `waitFor`**，
+避免把 HTTP 响应一起拖到 800 ms 之后。当前走哪条路可在 `/stats` 的 `inject` 字段看到。
+
+改完实测：`/key` 往返 **880 ms → 50–60 ms**（其中 32 ms 是两次 TCP 往返，`Connection: close` 每请求新建连接），
+`inject:"inputmanager"`、`injectOk` 计数增长、`injectFallback` 保持 0。
 
 ### 令牌从哪来
 

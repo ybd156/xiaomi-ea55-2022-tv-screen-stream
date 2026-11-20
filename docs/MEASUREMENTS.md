@@ -163,3 +163,36 @@ NAL 类型: {5(IDR):11, 7(SPS):21, 1(非IDR):120}
 
 - 看门狗必须识别 `idle`（否则「30 秒没新帧」会误判卡死并反复重启管线，10 分钟内 3 次还会误杀进程），已在 `startWatchdog` 里跳过。
 - `/stats` 的 `kbps` 是「最后一帧大小 × 平均帧率」，空闲归零、静止画面虚低，**不能当带宽用**。
+
+## 9. 遥控注入延时（2026-11-21，真机实测）
+
+**根因**：旧实现每次 `Runtime.exec("input keyevent N")`。`/system/bin/input` 是 shell 脚本，
+每次都要新起一个 ART 虚拟机。
+
+| 操作 | 实测（10 次平均） |
+|---|---|
+| `input keyevent 0`（KEYCODE_UNKNOWN，无副作用） | **846 ms** |
+| `input --help`（只启动，不做任何注入） | 838 ms |
+| `sendevent`（单条 evdev 事件） | 55 ms |
+| `/system/bin/true`（纯 fork+exec 基线） | 27 ms |
+| 5 次并发 `input keyevent` | 1.43 s（各自起 JVM，互相争核） |
+
+→ 846 ms 里 820 ms 是 JVM 冷启动，按键事件本身接近 0。代码注释里写的「约 30–80 ms」与实测差一个数量级。
+
+**改法**：`InputManager.injectInputEvent`（反射），一次 binder 调用；失败退回 `input` 且不再 `waitFor`。
+
+| 指标 | 改前 | 改后 |
+|---|---|---|
+| `/key` 往返（PC → 电视 → 回包） | ≈ 880 ms | **50–60 ms** |
+| 其中网络 | — | 32 ms（`Connection: close` 每请求两次往返） |
+| 其中注入 | 846 ms | **1–3 ms** |
+| `injectFallback` | — | 0（8/8 走快速通道） |
+
+**端到端感知**（按下去到电视画面变化）：请求 32 + 注入 3 + 电视 UI 响应 ~50–100 + 等下一帧 ≤57 + 回传 16
+≈ **100–200 ms**，改前约 0.95–1.0 s。
+
+**顺带修复**：入站 socket 关掉 Nagle（`setTcpNoDelay(true)`）。实测服务端处理本身已接近 0 ms
+（裸 socket：connect 16 ms，发出请求后 17 ms 收到首字节），所以 Nagle 不是主因，属防御性加固。
+
+**验证注意**：令牌默认每次启动随机生成，用旧令牌测 `/key` 会拿到 403（往返仅 34 ms，看起来"很快"但**根本没注入**）。
+判据要看 `/stats` 的 `injectOk` 是否增长。

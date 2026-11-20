@@ -583,12 +583,74 @@ public class ScreenControlManager {
 
     static boolean tokenOk(String t) { return TOKEN.equals(t); }
 
-    /** 发一个按键。input 每次 fork 一个进程，约 30–80 ms */
-    static void sendKey(int code) {
+    // ---------------- 按键注入 ----------------
+    //
+    // 旧实现每次 exec("input keyevent N")。`/system/bin/input` 是个 shell 脚本，
+    // 每次都要新起一个 ART 虚拟机：实测在这台电视上 **846 ms/次**（连 `input --help`
+    // 纯启动都要 838 ms），连按还会各自 fork 一个 JVM 互相抢核。遥控因此迟一秒左右。
+    //
+    // 现在优先走 InputManager.injectInputEvent：一次 binder 调用，实测 1–3 ms，
+    // Android keycode 语义与 `input keyevent` 完全一致（白名单不用改）。
+    // 拿不到（隐藏 API 反射失败 / 没有 INJECT_EVENTS）就退回旧路径，但改成不等待
+    // 进程退出——否则 /key 的 HTTP 响应还是会被拖到 800 ms 之后。
+    static final java.util.concurrent.atomic.AtomicBoolean INJECT_READY =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    static final java.util.concurrent.atomic.AtomicLong INJECT_OK =
+            new java.util.concurrent.atomic.AtomicLong();
+    static final java.util.concurrent.atomic.AtomicLong INJECT_FALLBACK =
+            new java.util.concurrent.atomic.AtomicLong();
+    static java.lang.reflect.Method M_INJECT;
+    static Object INJECTOR;
+    /** uninit / inputmanager / failed —— 给 /stats 显示当前走哪条路 */
+    static volatile String INJECT_MODE = "uninit";
+
+    /** 首次使用时初始化反射通道；失败则永久走兜底，只打印一次原因 */
+    static synchronized boolean initInjector() {
+        if (INJECT_READY.get()) return true;
+        if ("failed".equals(INJECT_MODE)) return false;
         try {
-            Process p = Runtime.getRuntime().exec(
-                    new String[]{"input", "keyevent", String.valueOf(code)});
-            if (!p.waitFor(2, java.util.concurrent.TimeUnit.SECONDS)) p.destroy();
+            Class<?> im = Class.forName("android.hardware.input.InputManager");
+            Object inst = im.getMethod("getInstance").invoke(null);
+            M_INJECT = im.getMethod("injectInputEvent", android.view.InputEvent.class, int.class);
+            INJECTOR = inst;
+            INJECT_MODE = "inputmanager";
+            INJECT_READY.set(true);
+            System.out.println("injector: InputManager.injectInputEvent 可用");
+            return true;
+        } catch (Throwable t) {
+            INJECT_MODE = "failed";
+            System.out.println("injector: InputManager 不可用，退回 input 子进程 → " + t);
+            return false;
+        }
+    }
+
+    /** 用 InputManager 注入一次按下+抬起；返回 false 表示这条路径没成 */
+    static boolean injectKeyFast(int code) {
+        try {
+            long now = android.os.SystemClock.uptimeMillis();
+            android.view.KeyEvent down = new android.view.KeyEvent(
+                    now, now, android.view.KeyEvent.ACTION_DOWN, code, 0);
+            android.view.KeyEvent up = new android.view.KeyEvent(
+                    now, now + 20, android.view.KeyEvent.ACTION_UP, code, 0);
+            Object r1 = M_INJECT.invoke(INJECTOR, down, 0);   // 0 = MODE_ASYNC
+            Object r2 = M_INJECT.invoke(INJECTOR, up, 0);
+            return Boolean.TRUE.equals(r1) && Boolean.TRUE.equals(r2);
+        } catch (Throwable t) {
+            System.out.println("inject fast fail: " + t);
+            return false;
+        }
+    }
+
+    /** 发一个按键：优先 ~1 ms 的 binder 注入，失败退回 input 子进程（不阻塞响应） */
+    static void sendKey(int code) {
+        if (initInjector() && injectKeyFast(code)) {
+            INJECT_OK.incrementAndGet();
+            return;
+        }
+        INJECT_FALLBACK.incrementAndGet();
+        try {
+            // 不 waitFor：input 要 800+ ms，等它只会把 /key 的响应一起拖住
+            Runtime.getRuntime().exec(new String[]{"input", "keyevent", String.valueOf(code)});
         } catch (Throwable t) {
             System.out.println("keyevent " + code + " fail: " + t);
         }
@@ -822,6 +884,10 @@ public class ScreenControlManager {
         boolean keepOpen = false;
         try {
             s.setSoTimeout(5000);
+            // 关掉 Nagle：响应头/体是两次 write，带 Nagle 时会撞上对端延迟 ACK，
+            // 每个小响应白等 ~40 ms（实测 /stats 48 ms，而 TCP 握手只要 16 ms）。
+            // 推流侧每帧也是一次 write，关掉同样能少等每帧尾部那个 ACK。
+            try { s.setTcpNoDelay(true); } catch (Throwable ignored) { }
             InputStream in = s.getInputStream();
             byte[] reqBuf = new byte[2048];
             int n = in.read(reqBuf);
@@ -1017,7 +1083,10 @@ public class ScreenControlManager {
                         + ",\"aback\":\"" + jsonEscape(AudioStream.backend()) + "\""
                         + ",\"awake\":" + awakeCached()
                         + ",\"idle\":" + IDLE
-                        + ",\"idleMs\":" + IDLE_MS + "}";
+                        + ",\"idleMs\":" + IDLE_MS
+                        + ",\"inject\":\"" + INJECT_MODE + "\""
+                        + ",\"injectOk\":" + INJECT_OK.get()
+                        + ",\"injectFallback\":" + INJECT_FALLBACK.get() + "}";
                 send(out, "application/json", json.getBytes("UTF-8"), true);
             } else {
                 send(out, "text/html; charset=utf-8", page().getBytes("UTF-8"), false);

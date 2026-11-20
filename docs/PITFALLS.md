@@ -305,3 +305,38 @@ s = io.open(p, encoding='utf-8', newline='').read().replace('
 ')
 io.open(p, 'w', encoding='utf-8', newline='').write(s)
 ```
+
+---
+
+## P18 · `kill -9` 掉 app_process 会让厂商采集会话泄漏
+
+**症状**：重启服务后画面全黑，`/stats` 的 `frames` 不增长，日志反复刷：
+
+```
+capture miss len=0
+```
+
+**原因**：采集线程正卡在 `native_ScreenCapBuffer` 里被强杀，`screencontrol` 那边的采集会话没释放，
+之后每次 grab 都返回 0 字节。本文件前面提过「起新管线前必须等旧线程退出」，强杀直接绕过了这个约束。
+
+**对策**（顺序不能反）：
+
+```bash
+adb shell su -c 'killall screencontrol'   # 1) 重启厂商守护进程，系统会自动拉起
+# 2) 等它回来（pidof screencontrol 出现新 pid），再 SIGTERM 正常停/起服务
+```
+
+---
+
+## P19 · 息屏时 `grab` 返回 0 字节，而 `fps` 会停在旧值
+
+**症状**：电视息屏后 `/stats` 显示 `awake:false`，但 `fps` 仍是 17–18，看着像采集正常；实际 `frames` 不动、
+`/snap` 拿不到新图。
+
+**原因**：显示管线停了，`native_ScreenCapBuffer` 返回长度 0；`STAT_FPS` 只在编码线程每 3 秒的统计窗口里更新，
+采集断了它就**保持最后一次的值**。
+
+**对策**：判断采集是否活着只看 **`frames` 是否在增长**，不要看 `fps`。要恢复画面先 `/wake`。
+`awake` 字段可作提前量，但有 2 秒缓存，不能当唯一判据。
+
+---
