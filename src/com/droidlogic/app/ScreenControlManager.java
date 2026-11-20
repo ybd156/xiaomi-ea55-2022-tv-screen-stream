@@ -167,6 +167,12 @@ public class ScreenControlManager {
     /** 空闲期间 /snap 要求补一帧 */
     static volatile boolean SNAP_WANTED = false;
 
+    /**
+     * 采集后端开关：false = 厂商 screencontrol（默认，兼容旧行为）；
+     * true = 直采 /dev/video12（serve-vdin 模式，实测 30 fps 恒定，但要求 screencontrol 不占用设备）。
+     */
+    static volatile boolean USE_VDIN = false;
+
     // ---- 视频客户端注册表：每端一个有界队列，慢端只丢自己的帧 ----
 
     /** 同时在线的视频流客户端上限（防止线程/内存被耗光） */
@@ -233,7 +239,17 @@ public class ScreenControlManager {
     static void serve(final int srcType, int w, int h, int port, int outW, int outH) throws Exception {
         CUR_W = w;
         CUR_H = h;
-        startPipeline(srcType, w, h);
+        if (USE_VDIN) {
+            int rc = VdinCapture.open("/dev/video12", w, h);
+            System.out.println("VDIN open(" + w + "x" + h + ") rc=" + rc);
+            if (rc != 0) {
+                System.out.println("VDIN 打不开（多半是 screencontrol 还占着 /dev/video12），进程退出");
+                System.exit(3);
+            }
+            startVdinPipeline(w, h);
+        } else {
+            startPipeline(srcType, w, h);
+        }
         startWatchdog();
 
         // 采 LOOPBACK-A（device 7, 8 声道）：这是原仓库的配置，实测音峰 ~100+；
@@ -271,8 +287,9 @@ public class ScreenControlManager {
                 try { Thread.sleep(10000); } catch (InterruptedException ignored) { }
                 long f = STAT_FRAMES;
                 long now = System.currentTimeMillis();
-                if (IDLE) {
-                    // 空闲停采时本来就不产帧，不能按「帧数不涨」判卡住，
+                if (IDLE || USE_VDIN) {
+                    // 空闲停采时本来就不产帧；VDIN 模式下重启管线会走厂商接口（会失败），
+                    // 所以两者都不做「帧数不涨」判定，避免误杀进程
                     // 否则每 30 秒白重启一次管线，还会累加到 10 分钟 3 次而误杀进程
                     lastFrames = f;
                     lastChange = now;
@@ -468,6 +485,77 @@ public class ScreenControlManager {
         System.out.println("pipeline gen=" + gen + " " + w + "x" + h);
     }
 
+    /**
+     * VDIN 直采管线（serve-vdin 模式）。
+     *
+     * 与厂商路径的区别：常开流、单线程 grab→JPEG、**不做 RGBA 转换**（YuvImage 直接吃 NV21）。
+     * 实测 480p/960p/720p/1080p 全部恒定 30 fps（厂商路径分别是 16.6 / 8.3 / 5.5 / 3.0）。
+     * 前提：/dev/video12 必须空闲，即 screencontrol 不能占着它。
+     */
+    static void startVdinPipeline(final int w, final int h) {
+        final int gen = ++GEN;
+        STAT_W = w;
+        STAT_H = h;
+        Thread t = new Thread(() -> {
+            byte[] nv21 = new byte[w * h * 3 / 2];
+            boolean wasIdle = false;
+            int okFrames = 0;
+            long windowStart = System.currentTimeMillis();
+            System.out.println("vdin pipeline gen=" + gen + " " + w + "x" + h);
+            while (gen == GEN) {
+                if (clientCount() > 0) {
+                    LAST_VIEWER_MS = System.currentTimeMillis();
+                    if (wasIdle) {
+                        wasIdle = false;
+                        IDLE = false;
+                        System.out.println("idle: 恢复采集（VDIN）");
+                    }
+                } else if (IDLE_MS > 0 && System.currentTimeMillis() - LAST_VIEWER_MS > IDLE_MS) {
+                    if (!wasIdle) {
+                        wasIdle = true;
+                        IDLE = true;
+                        STAT_FPS = 0;
+                        STAT_KBPS = 0;
+                        System.out.println("idle: 无人观看，暂停采集（VDIN）");
+                    }
+                    try { Thread.sleep(200); } catch (InterruptedException ignored) {}
+                    continue;
+                }
+                int n = VdinCapture.grab(nv21);
+                if (n <= 0) continue;          // -1 超时是常态，直接下一轮
+                try {
+                    android.graphics.YuvImage yi = new android.graphics.YuvImage(
+                            nv21, android.graphics.ImageFormat.NV21, w, h, null);
+                    java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream(256 * 1024);
+                    yi.compressToJpeg(new android.graphics.Rect(0, 0, w, h), JPEGQ, bos);
+                    byte[] jpg = bos.toByteArray();
+                    latestJpeg = jpg;
+                    latestSeq++;
+                    broadcastJpeg(jpg);
+                    STAT_FRAMES++;
+                    okFrames++;
+                } catch (Throwable e) {
+                    System.out.println("vdin encode error: " + e);
+                }
+                long now = System.currentTimeMillis();
+                if (now - windowStart >= 3000) {
+                    double fps = okFrames * 1000.0 / (now - windowStart);
+                    STAT_FPS = fps;
+                    STAT_KBPS = (latestJpeg == null ? 0 : latestJpeg.length) * 8.0 * fps / 1000.0;
+                    System.out.printf("VDINSTAT %dx%d fps=%.2f jpeg=%dKB%n",
+                            w, h, fps, latestJpeg == null ? 0 : latestJpeg.length / 1024);
+                    okFrames = 0;
+                    windowStart = now;
+                }
+            }
+            IDLE = false;
+            System.out.println("vdin pipeline gen=" + gen + " exit");
+        }, "vdin");
+        t.setDaemon(true);
+        CUR_CAP_THREAD = t;
+        t.start();
+    }
+
 
     // ---------------- 电源控制 ----------------
 
@@ -519,6 +607,20 @@ public class ScreenControlManager {
         if (w < 64 || h < 36 || w > 1920 || h > 1080) return;
         CUR_W = w;
         CUR_H = h;
+        if (USE_VDIN) {
+            // VDIN 模式：必须重开设备换尺寸，**绝不能掉回厂商管线**
+            // （screencontrol 已被停掉，走 startPipeline 会直接崩，实测进程当场死亡）
+            ++GEN;
+            Thread old = CUR_CAP_THREAD;
+            if (old != null) {
+                try { old.join(800); } catch (InterruptedException ignored) { }
+            }
+            VdinCapture.close();
+            int rc = VdinCapture.open("/dev/video12", w, h);
+            System.out.println("VDIN 重开 " + w + "x" + h + " rc=" + rc);
+            if (rc == 0) startVdinPipeline(w, h);
+            return;
+        }
         startPipeline(1, w, h);
     }
 
@@ -678,6 +780,104 @@ public class ScreenControlManager {
         }
     }
 
+    // ---------------- 应用列表 / 启动应用 / 重启 ----------------
+    //
+    // 为什么不用 PackageManager：app_process 里想拿 Context 只能走
+    // ActivityThread.systemMain()，实测在这台电视上会抛 InvocationTargetException
+    // 并把整个进程带走（流直接断）。所以这里只用 `cmd package` 命令行拿组件，
+    // 代价是拿不到应用中文名——下拉框里显示包名。
+    /** 应用列表缓存（JSON），免得每次点开都重扫 */
+    static volatile String APPS_JSON;
+    static volatile long APPS_TS;
+    static final long APPS_TTL_MS = 60 * 1000L;
+
+    /** 扫一遍可启动组件：TV 应用走 LEANBACK_LAUNCHER，普通应用再补 LAUNCHER */
+    static String appsJson() {
+        long now = System.currentTimeMillis();
+        String cached = APPS_JSON;
+        if (cached != null && now - APPS_TS < APPS_TTL_MS) return cached;
+
+        java.util.LinkedHashMap<String, String[]> uniq = new java.util.LinkedHashMap<>();
+        String[] cats = {"android.intent.category.LEANBACK_LAUNCHER",
+                         "android.intent.category.LAUNCHER"};
+        for (String cat : cats) {
+            try {
+                Process p = Runtime.getRuntime().exec(new String[]{"sh", "-c",
+                        "cmd package query-activities --brief -a android.intent.action.MAIN -c "
+                                + cat + " 2>/dev/null | grep '/'"});
+                java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+                byte[] b = new byte[1024];
+                int n;
+                while ((n = p.getInputStream().read(b)) > 0) bos.write(b, 0, n);
+                p.waitFor(8, java.util.concurrent.TimeUnit.SECONDS);
+                for (String line : bos.toString("UTF-8").split("\\n")) {
+                    String comp = line.trim();
+                    int slash = comp.indexOf('/');
+                    if (slash <= 0) continue;
+                    String pkg = comp.substring(0, slash);
+                    if (pkg.indexOf('.') < 0) continue;
+                    // 同一包有多个入口时保留先出现的（LEANBACK 优先）
+                    if (!uniq.containsKey(pkg)) uniq.put(pkg, new String[]{pkg, comp});
+                }
+            } catch (Throwable t) {
+                System.out.println("apps: 枚举 " + cat + " 失败 → " + t);
+            }
+        }
+
+        java.util.TreeMap<String, String[]> sorted = new java.util.TreeMap<>();
+        for (String[] v : uniq.values()) sorted.put(v[0], v);
+        java.util.List<String> items = new java.util.ArrayList<>();
+        for (String[] v : sorted.values()) {
+            items.add("{\"pkg\":\"" + jsonEscape(v[0]) + "\",\"label\":\"" + jsonEscape(v[0])
+                    + "\",\"comp\":\"" + jsonEscape(v[1]) + "\"}");
+        }
+        String json = "{\"ok\":true,\"count\":" + items.size() + ",\"apps\":["
+                + String.join(",", items) + "]}";
+        APPS_JSON = json;
+        APPS_TS = now;
+        return json;
+    }
+
+    /**
+     * 启动应用。`am` 每次也要起 JVM（约 850 ms），所以异步执行、立即返回，
+     * 让画面自己体现结果。优先用页面传来的组件名，省掉一次解析。
+     */
+    static boolean launchApp(String pkg, String comp) {
+        if (pkg == null || pkg.isEmpty()) return false;
+        final String[] cmd = (comp != null && comp.indexOf('/') > 0)
+                ? new String[]{"am", "start", "-n", comp}
+                : new String[]{"am", "start", "-a", "android.intent.action.MAIN",
+                        "-c", "android.intent.category.LEANBACK_LAUNCHER", "-p", pkg};
+        try {
+            new Thread(() -> {
+                try {
+                    Process p = Runtime.getRuntime().exec(cmd);
+                    p.waitFor(10, java.util.concurrent.TimeUnit.SECONDS);
+                    System.out.println("launch " + pkg + " via " + cmd[cmd.length - 1]);
+                } catch (Throwable t) {
+                    System.out.println("launch fail: " + t);
+                }
+            }, "launch").start();
+            return true;
+        } catch (Throwable t) {
+            System.out.println("launch spawn fail: " + t);
+            return false;
+        }
+    }
+
+    /** 重启电视。先让 HTTP 响应发出去，再执行 reboot。 */
+    static void rebootNow() {
+        new Thread(() -> {
+            try {
+                Thread.sleep(800);
+                System.out.println("reboot: 执行重启");
+                Runtime.getRuntime().exec(new String[]{"reboot"});
+            } catch (Throwable t) {
+                System.out.println("reboot fail: " + t);
+            }
+        }, "reboot").start();
+    }
+
     static final String PAGE_TEMPLATE =
         "<!doctype html><html lang=zh><head><meta charset=utf-8>"
       + "<meta name=viewport content='width=device-width,initial-scale=1,viewport-fit=cover'>"
@@ -712,6 +912,8 @@ public class ScreenControlManager {
       + "#rc .wide{grid-column:span 3;display:flex;gap:6px}"
       + "#rc .wide button{flex:0 0 64px}"
       + "#rc input{flex:1;min-width:0;background:#1e1e26;color:#d7d7dd;border:1px solid #2c2c36;border-radius:7px;padding:8px;font-size:13px}"
+      + "#rc .wide select{flex:1;min-width:0;background:#1e1e26;color:#d7d7dd;border:1px solid #2c2c36;border-radius:7px;padding:8px;font-size:13px}"
+      + "#rc .pwr button.reboot{border-color:#7a2f2f;color:#ff9a9a}"
       + "</style></head><body>"
       + "<div class=bar><span id=dot class='dot idle'></span><span class=stat id=s1>连接中…</span><span class=sp></span>"
       + "<button id=ab onclick=audio()>关闭声音</button>"
@@ -742,6 +944,9 @@ public class ScreenControlManager {
       + "</div>"
       + "<div class=wide><input id=txt placeholder=\"输入文字…\" onkeydown=\"if(event.key==='Enter')rcText()\">"
       + "<button onclick=\"rcText()\">发送</button></div>"
+      + "<div class=wide><select id=apps onchange=launchApp()><option value=''>启动应用…</option></select>"
+      + "<button onclick=loadApps()>刷新</button></div>"
+      + "<div class=wide><button class=reboot style=\"flex:1\" onclick=doReboot()>重启电视</button></div>"
       + "</div>"
       + "<div class=stage><canvas id=v></canvas>"
       + "<div id=off><div class=t>电视已息屏</div><div class=s>屏幕关闭时无法采集画面（回采的是显示管线）</div>"
@@ -795,6 +1000,15 @@ public class ScreenControlManager {
       + "function fs(){const el=document.querySelector('.stage');"
       + "if(document.fullscreenElement){document.exitFullscreen();}else if(el.requestFullscreen){el.requestFullscreen();}}"
       + "function shot(){window.open('/snap','_blank');}"
+      + "function loadApps(){fetch('/apps?t='+TK).then(r=>r.json()).then(j=>{if(!j.ok)return;"
+      + "const s=document.getElementById('apps');while(s.options.length>1)s.remove(1);"
+      + "j.apps.forEach(a=>{const o=document.createElement('option');o.value=a.pkg;o.textContent=a.label;o.dataset.comp=a.comp||'';s.appendChild(o);});"
+      + "}).catch(()=>{});}"
+      + "function launchApp(){const s=document.getElementById('apps');if(!s.value)return;"
+      + "const p=s.value;const c=(s.options[s.selectedIndex].dataset.comp)||'';s.selectedIndex=0;"
+      + "fetch('/app?t='+TK+'&pkg='+encodeURIComponent(p)+'&comp='+encodeURIComponent(c)).then(r=>r.json()).then(j=>{if(!j.ok)AB.textContent='启动失败';}).catch(()=>{});}"
+      + "function doReboot(){if(!confirm('确定重启电视？约 90 秒后恢复，期间画面会中断'))return;"
+      + "fetch('/reboot?t='+TK).then(r=>r.json()).then(()=>{document.getElementById('s1').textContent='正在重启，约 90 秒后恢复…';}).catch(()=>{});}"
       + "function setres(){const p=document.getElementById('res').value.split(',');"
       + "fetch('/set?w='+p[0]+'&h='+p[1]).then(r=>r.json()).then(()=>{openVideo();}).catch(()=>{});}"
       + "function pw(u){fetch(u).then(r=>r.json()).then(()=>{setTimeout(tick,800);setTimeout(()=>{if(!sleeping)openVideo();},1800);}).catch(()=>{});}"
@@ -835,6 +1049,7 @@ public class ScreenControlManager {
       + "}).catch(e=>{AB.textContent='切源失败';AB.title=String(e);});}"
       + "openVideo();"
       + "startAudio();"
+      + "loadApps();"
       + "document.addEventListener('pointerdown',function(){try{if(ac&&ac.state==='suspended')ac.resume();}catch(e){}},{once:true});"
       + "</script></body></html>";
 
@@ -1068,6 +1283,38 @@ public class ScreenControlManager {
                                 ("{\"ok\":true,\"len\":" + safe.length() + "}").getBytes("UTF-8"), true);
                     }
                 }
+            } else if (path.startsWith("/apps")) {
+                if (!tokenOk(param(path, "t"))) {
+                    send(out, 403, "application/json",
+                            "{\"ok\":false,\"err\":\"bad or missing token\"}".getBytes("UTF-8"), true);
+                } else {
+                    send(out, "application/json", appsJson().getBytes("UTF-8"), true);
+                }
+            } else if (path.startsWith("/app")) {
+                if (!tokenOk(param(path, "t"))) {
+                    send(out, 403, "application/json",
+                            "{\"ok\":false,\"err\":\"bad or missing token\"}".getBytes("UTF-8"), true);
+                } else {
+                    String pkg = param(path, "pkg");
+                    // param() 不解码，组件名里的 %2F 要自己还原
+                    String comp = param(path, "comp");
+                    try {
+                        if (comp != null) comp = java.net.URLDecoder.decode(comp, "UTF-8");
+                    } catch (Throwable ignored) { }
+                    boolean ok = launchApp(pkg, comp);
+                    send(out, "application/json",
+                            ("{\"ok\":" + ok + ",\"pkg\":\"" + jsonEscape(String.valueOf(pkg)) + "\"}")
+                                    .getBytes("UTF-8"), true);
+                }
+            } else if (path.startsWith("/reboot")) {
+                if (!tokenOk(param(path, "t"))) {
+                    send(out, 403, "application/json",
+                            "{\"ok\":false,\"err\":\"bad or missing token\"}".getBytes("UTF-8"), true);
+                } else {
+                    send(out, "application/json",
+                            "{\"ok\":true,\"reboot\":true,\"note\":\"约 90 秒后恢复\"}".getBytes("UTF-8"), true);
+                    rebootNow();
+                }
             } else if (path.startsWith("/stats")) {
                 String json = "{\"fps\":" + String.format(java.util.Locale.US, "%.2f", STAT_FPS)
                         + ",\"kbps\":" + String.format(java.util.Locale.US, "%.0f", STAT_KBPS)
@@ -1155,7 +1402,8 @@ public class ScreenControlManager {
                 int bitrate = args.length > 5 ? Integer.parseInt(args[5]) : 600000;
                 int fpsArg = args.length > 6 ? Integer.parseInt(args[6]) : 15;
                 new H264Stream(w, h, fpsArg, bitrate, port).start();
-            } else if ("serve".equals(mode)) {
+            } else if ("serve".equals(mode) || "serve-vdin".equals(mode)) {
+                USE_VDIN = "serve-vdin".equals(mode);
                 int port = args.length > 4 ? Integer.parseInt(args[4]) : 8899;
                 int outW = args.length > 5 ? Integer.parseInt(args[5]) : 960;
                 int outH = args.length > 6 ? Integer.parseInt(args[6]) : 540;
