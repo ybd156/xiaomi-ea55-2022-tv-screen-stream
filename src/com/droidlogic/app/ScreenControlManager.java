@@ -173,6 +173,9 @@ public class ScreenControlManager {
      */
     static volatile boolean USE_VDIN = false;
 
+    /** 采集帧率（仅 VDIN 模式生效；厂商接口是每帧一会话，无法控制）。实测请求 60 得到约 50 */
+    static volatile int CUR_FPS = 30;
+
     // ---- 视频客户端注册表：每端一个有界队列，慢端只丢自己的帧 ----
 
     /** 同时在线的视频流客户端上限（防止线程/内存被耗光） */
@@ -240,8 +243,8 @@ public class ScreenControlManager {
         CUR_W = w;
         CUR_H = h;
         if (USE_VDIN) {
-            int rc = VdinCapture.open("/dev/video12", w, h);
-            System.out.println("VDIN open(" + w + "x" + h + ") rc=" + rc);
+            int rc = VdinCapture.open("/dev/video12", w, h, CUR_FPS);
+            System.out.println("VDIN open(" + w + "x" + h + " @" + CUR_FPS + "fps) rc=" + rc);
             if (rc != 0) {
                 System.out.println("VDIN 打不开（多半是 screencontrol 还占着 /dev/video12），进程退出");
                 System.exit(3);
@@ -603,8 +606,9 @@ public class ScreenControlManager {
         } catch (Throwable t) { System.out.println("sleep fail: " + t); }
     }
 
-    static void switchResolution(int w, int h) {
+    static void switchResolution(int w, int h, int fps) {
         if (w < 64 || h < 36 || w > 1920 || h > 1080) return;
+        if (fps > 0) CUR_FPS = Math.max(1, Math.min(60, fps));
         CUR_W = w;
         CUR_H = h;
         if (USE_VDIN) {
@@ -616,8 +620,8 @@ public class ScreenControlManager {
                 try { old.join(800); } catch (InterruptedException ignored) { }
             }
             VdinCapture.close();
-            int rc = VdinCapture.open("/dev/video12", w, h);
-            System.out.println("VDIN 重开 " + w + "x" + h + " rc=" + rc);
+            int rc = VdinCapture.open("/dev/video12", w, h, CUR_FPS);
+            System.out.println("VDIN 重开 " + w + "x" + h + " @" + CUR_FPS + "fps rc=" + rc);
             if (rc == 0) startVdinPipeline(w, h);
             return;
         }
@@ -952,13 +956,6 @@ public class ScreenControlManager {
       + "<option value='PDMIN'>麦克风</option>"
       + "<option value='SPDIFIN'>SPDIF 输入</option>"
       + "</select>"
-      + "<span class=lb>画质</span><select id=res onchange=setres()>"
-      + "<option value='320,180'>320×180</option>"      + "<option value='480,270' selected>480×270</option>"
-      + "<option value='640,360'>640×360</option>"
-      + "<option value='960,540'>960×540</option>"
-      + "<option value='1280,720'>1280×720</option>"
-      + "<option value='1920,1080'>1920×1080</option>"
-      + "</select>"
       + "<button onclick=toggleRC()>遥控</button></div>"
       + "<div id=rc class=on>"
       + "<div class=pwr><button onclick=\"pw('/wake')\">唤醒</button><button onclick=\"pw('/sleep')\">息屏</button></div>"
@@ -993,8 +990,23 @@ public class ScreenControlManager {
       + "<button data-sw='720px' onclick=\"setsize('720px',this)\">小</button>"
       + "<button data-sw='960px' onclick=\"setsize('960px',this)\">中</button>"
       + "<button data-sw='1280px' onclick=\"setsize('1280px',this)\">大</button>"
+      + "<button data-sw='1600px' onclick=\"setsize('1600px',this)\">超大</button>"
       + "<button data-sw='100%' onclick=\"setsize('100%',this)\">自适应</button>"
-      + "</span></div></div></div>"
+      + "</span>"
+      + "<span class=lb>画质</span>"
+      + "<span class=seg id=segres>"
+      + "<button data-w='480' onclick=\"setres2(480,270,this)\">480</button>"
+      + "<button data-w='960' onclick=\"setres2(960,540,this)\">960</button>"
+      + "<button data-w='1280' onclick=\"setres2(1280,720,this)\">720p</button>"
+      + "<button data-w='1920' onclick=\"setres2(1920,1080,this)\">1080p</button>"
+      + "</span>"
+      + "<span class=lb>帧率</span>"
+      + "<span class=seg id=segfps>"
+      + "<button data-fps='24' onclick=\"setfps(24,this)\">24</button>"
+      + "<button data-fps='30' onclick=\"setfps(30,this)\">30</button>"
+      + "<button data-fps='60' onclick=\"setfps(60,this)\">60</button>"
+      + "</span>"
+      + "</div></div></div>"
       + "<script>"
       + "const TK='__TK__';"
       + "function rc(c){fetch('/key?code='+c+'&t='+TK).then(r=>r.json()).then(j=>{if(!j.ok){AB.textContent='遥控失败';AB.title=j.err||'';}}).catch(e=>{AB.textContent='遥控失败';AB.title=String(e);});}"
@@ -1039,8 +1051,8 @@ public class ScreenControlManager {
       + "  S.textContent=fps+' fps · '+(j.kbps/1000).toFixed(2)+' Mbps · '+j.w+'×'+j.h+' · 看 '+j.clients+(j.audio?(' · 音峰 '+j.apeak):(' · 音频关'+(j.aerr?('（'+j.aerr.slice(0,18)+'…）'):'')));"
       + "  S.title=j.aerr||'';"
       + "  OV.innerHTML='<b style=\\'color:#2ecc71\\'>'+fps+'</b> fps<br>'+(j.kbps/1000).toFixed(2)+' Mbps<br>'+j.w+'×'+j.h+'<br>看 '+j.clients+' 端'+(j.audio?(' · 音峰 '+j.apeak):'');"
-      + "  const rv=j.w+','+j.h,rs=document.getElementById('res');"
-      + "  if(rs.value!==rv){for(let i=0;i<rs.options.length;i++){if(rs.options[i].value===rv){rs.selectedIndex=i;break;}}}"
+      + "  if(j.w&&j.h&&(j.w!==curW||j.h!==curH)){curW=j.w;curH=j.h;markSeg('segres','w',j.w);}"
+      + "  if(j.fpsTarget&&j.fpsTarget!==curF){curF=j.fpsTarget;markSeg('segfps','fps',j.fpsTarget);}"
       + "  D.className=(fps>0)?'dot':'dot bad';"
       + " }"
       + "}).catch(()=>{S.textContent='连不上服务';D.className='dot bad';});}"
@@ -1071,6 +1083,7 @@ public class ScreenControlManager {
       + "(function(){let v='960px';try{v=localStorage.getItem('tvss_sw')||'960px';}catch(e){}"
       + " try{const q=new URLSearchParams(location.search).get('sw');if(q)v=q;}catch(e){}"
       + " ST.style.setProperty('--sw',v);markSize();"
+      + " markSeg('segres','w',curW);markSeg('segfps','fps',curF);"
       + " ST.classList.add('touch');setTimeout(function(){ST.classList.remove('touch');},3500);"
       + " if(window.innerWidth<900){document.getElementById('rc').classList.remove('on');}syncRC();})();"
       + "function toggleRC(){const r=document.getElementById('rc');r.classList.toggle('on');"
@@ -1085,8 +1098,14 @@ public class ScreenControlManager {
       + "fetch('/app?t='+TK+'&pkg='+encodeURIComponent(p)+'&comp='+encodeURIComponent(c)).then(r=>r.json()).then(j=>{if(!j.ok)AB.textContent='启动失败';}).catch(()=>{});}"
       + "function doReboot(){if(!confirm('确定重启电视？约 90 秒后恢复，期间画面会中断'))return;"
       + "fetch('/reboot?t='+TK).then(r=>r.json()).then(()=>{document.getElementById('s1').textContent='正在重启，约 90 秒后恢复…';}).catch(()=>{});}"
-      + "function setres(){const p=document.getElementById('res').value.split(',');"
-      + "fetch('/set?w='+p[0]+'&h='+p[1]).then(r=>r.json()).then(()=>{openVideo();}).catch(()=>{});}"
+      + "let curW=480,curH=270,curF=30;"
+      + "function markSeg(id,attr,val){const p=document.getElementById(id);if(!p)return;"
+      + " [].forEach.call(p.children,function(b){b.classList.toggle('on',String(b.dataset[attr])===String(val));});}"
+      + "function applyAV(){"
+      + " fetch('/set?w='+curW+'&h='+curH+'&fps='+curF).then(r=>r.json()).then(j=>{if(j.fps)curF=j.fps;openVideo();}).catch(()=>{});}"
+      + "function setres2(w,h,btn){curW=w;curH=h;markSeg('segres','w',w);applyAV();}"
+      + "function setfps(f,btn){curF=f;markSeg('segfps','fps',f);applyAV();}"
+      + "function setres(){applyAV();}"
       + "function pw(u){fetch(u).then(r=>r.json()).then(()=>{setTimeout(tick,800);setTimeout(()=>{if(!sleeping)openVideo();},1800);}).catch(()=>{});}"
       + "function stopAudio(){audioOn=false;try{if(aborter){aborter.abort();aborter=null;}}catch(e){}try{if(ac)ac.close();}catch(e){}ac=null;AB.textContent='开启声音';}"
       + "function audio(){if(audioOn){stopAudio();}else{startAudio();}}"
@@ -1259,7 +1278,7 @@ public class ScreenControlManager {
                     send(out, "image/jpeg", jpg, true);
                 }
             } else if (path.startsWith("/set")) {
-                int nw = CUR_W, nh = CUR_H;
+                int nw = CUR_W, nh = CUR_H, nf = CUR_FPS;
                 int q = path.indexOf('?');
                 if (q > 0) {
                     for (String kv : path.substring(q + 1).split("&")) {
@@ -1267,13 +1286,14 @@ public class ScreenControlManager {
                         if (p2.length == 2) {
                             if (p2[0].equals("w")) nw = Integer.parseInt(p2[1]);
                             if (p2[0].equals("h")) nh = Integer.parseInt(p2[1]);
+                            if (p2[0].equals("fps")) nf = Integer.parseInt(p2[1]);
                         }
                     }
                 }
-                switchResolution(nw, nh);
+                switchResolution(nw, nh, nf);
                 Thread.sleep(300);
                 send(out, "application/json",
-                        ("{\"w\":" + CUR_W + ",\"h\":" + CUR_H + "}").getBytes("UTF-8"), true);
+                        ("{\"w\":" + CUR_W + ",\"h\":" + CUR_H + ",\"fps\":" + CUR_FPS + "}").getBytes("UTF-8"), true);
             } else if (path.startsWith("/pcm")) {
                 String head = "HTTP/1.0 200 OK" + CRLF
                         + "Content-Type: audio/L16;rate=48000;channels=2" + CRLF
@@ -1407,6 +1427,8 @@ public class ScreenControlManager {
                         + ",\"awake\":" + awakeCached()
                         + ",\"idle\":" + IDLE
                         + ",\"idleMs\":" + IDLE_MS
+      + ",\"fpsTarget\":" + CUR_FPS
+      + ",\"vdin\":" + (USE_VDIN ? "true" : "false")
                         + ",\"inject\":\"" + INJECT_MODE + "\""
                         + ",\"injectOk\":" + INJECT_OK.get()
                         + ",\"injectFallback\":" + INJECT_FALLBACK.get() + "}";
@@ -1484,6 +1506,7 @@ public class ScreenControlManager {
                 int outW = args.length > 5 ? Integer.parseInt(args[5]) : 960;
                 int outH = args.length > 6 ? Integer.parseInt(args[6]) : 540;
                 if (args.length > 7) JPEGQ = Integer.parseInt(args[7]);
+                if (args.length > 8) CUR_FPS = Integer.parseInt(args[8]);
                 serve(srcType, w, h, port, outW, outH);
             } else {
                 single(srcType, w, h, args.length > 4 ? args[4] : "/data/local/tmp/cap.raw");

@@ -41,8 +41,13 @@ running() {
 }
 
 # 停掉 screencontrol 并确认它真的退出（它握着 /dev/video12）
+#
+# 关键：init 里的服务名是 **screen_control**（下划线），不是 screencontrol。
+# 早前用 `stop screencontrol` 一直是空操作，于是 killall 之后 init 立刻把它拉回来，
+# 日志里会出现每 20 秒一条「screencontrol 又出现了」——那是在和 init 对着干。
+# 用对名字之后 init.svc.screen_control=stopped，进程不再自愈回来。
 free_vdin() {
-    stop screencontrol 2>/dev/null
+    stop screen_control 2>/dev/null
     n=0
     while [ $n -lt 15 ] && [ -n "$(pidof screencontrol)" ]; do
         killall screencontrol 2>/dev/null
@@ -101,7 +106,7 @@ while true; do
             log "VDIN 起不来，回退厂商模式"
             kill "$(cat $PIDFILE 2>/dev/null)" 2>/dev/null
             sleep 2
-            start screencontrol 2>/dev/null
+            start screen_control 2>/dev/null
             sleep 3
             MODE=serve
             start_svc

@@ -242,6 +242,37 @@ NAL 类型: {5(IDR):11, 7(SPS):21, 1(非IDR):120}
 
 > 音频不经过 VDIN，走原 `tinycap` 8 声道下混路径，VDIN 模式下未受影响。
 
+### 11.6 帧率控制（2026-11-21 04:30）
+
+厂商录包里 `S_OUTPUT` 之后紧跟的 `0xc0cc5616`（204 字节）就是 **VIDIOC_S_PARM**
+（`sizeof(struct v4l2_streamparm)` = 204，`_IOWR('V',22,...)`）。而 `0xc0cc5605`
+是 `S_FMT`（同样 204 字节，说明本驱动里 `sizeof(struct v4l2_format)` 也是 204，
+不是标准头的 208 —— 用标准头算出的 `0xc0d05605` 也能被接受，但结构体长度是错的）。
+
+实测（480×270，`/raw` 10 秒窗口）：
+
+| 目标帧率 | 实测 | 码率 |
+|---|---|---|
+| 60 | **50.8 fps**（帧间隔 18.5–21.6 ms） | ~9 Mbps |
+| 30 | 30.3 fps | ~4.5 Mbps |
+| 24 | 24.3 fps | ~2.4 Mbps |
+| 不设（默认） | 29.9 fps | — |
+
+**请求 60 只能到 ~50 fps**，不是编码跟不上（480p 编码能跑 30+），而是源端上限
+（面板/VDIN 输出）。所以「60」这个选项实际是「尽量快」。
+
+运行时切换：`/set?w=&h=&fps=`，内部会关掉再重开 VDIN 设备（尺寸和帧率都要重协商）。
+
+### 11.7 init 服务名是 `screen_control`（重要）
+
+`/system/etc/init/screencontrol.rc` 里定义的服务名是 **`screen_control`（带下划线）**，
+二进制才叫 `screencontrol`。`stop screencontrol` 是**空操作**，所以 `killall` 之后
+init 会立刻把进程拉回来 —— 早期日志里每 20~25 秒一条「screencontrol 又出现了」
+就是在和 init 对着干（累计 23 次）。
+
+正确写法：`stop screen_control` → `init.svc.screen_control=stopped`，进程不再自愈。
+**不需要删任何文件**，也就不需要动 `/system` 分区。
+
 ## 9. 遥控注入延时（2026-11-21，真机实测）
 
 **根因**：旧实现每次 `Runtime.exec("input keyevent N")`。`/system/bin/input` 是 shell 脚本，

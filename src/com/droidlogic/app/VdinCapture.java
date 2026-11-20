@@ -18,8 +18,8 @@ public final class VdinCapture {
         System.load("/data/local/tmp/libvdin.so");
     }
 
-    /** 打开并开流。0=成功，负数为错误码（-2 打不开、-3 S_OUTPUT、-4/-5 S_FMT、-6 REQBUFS、-7~-9 缓冲、-10 STREAMON）。 */
-    public static native int open(String path, int w, int h);
+    /** 打开并开流。fps<=0 表示用驱动默认（30）。0=成功，负数为错误码（-2 打不开、-3 S_OUTPUT、-4/-5 S_FMT、-6 REQBUFS、-7~-9 缓冲、-10 STREAMON、-11 S_PARM）。 */
+    public static native int open(String path, int w, int h, int fps);
 
     /** 取一帧到 nv21（长度需 ≥ w*h*3/2）。返回写入字节数；-1 本轮超时（正常）；-2 出错。 */
     public static native int grab(byte[] nv21);

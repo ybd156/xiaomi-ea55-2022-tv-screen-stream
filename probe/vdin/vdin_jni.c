@@ -47,7 +47,7 @@ static void teardown(void) {
 }
 
 JNIEXPORT jint JNICALL
-Java_com_droidlogic_app_VdinCapture_open(JNIEnv *env, jclass cls, jstring jpath, jint w, jint h) {
+Java_com_droidlogic_app_VdinCapture_open(JNIEnv *env, jclass cls, jstring jpath, jint w, jint h, jint fps) {
     teardown();
     const char *path = (*env)->GetStringUTFChars(env, jpath, NULL);
     if (!path) return -1;
@@ -57,6 +57,17 @@ Java_com_droidlogic_app_VdinCapture_open(JNIEnv *env, jclass cls, jstring jpath,
 
     unsigned int port = PORT_TYPE;
     if (ioctl(fd, 0xC0045627, &port) < 0) { close(fd); return -3; }   /* S_OUTPUT */
+
+    /* 帧率：厂商录包里 S_OUTPUT 之后紧跟 0xc0cc5616（204 字节 = v4l2_streamparm），
+     * 就是 VIDIOC_S_PARM。实测请求 60 得到 ~50fps，30/24 精确。 */
+    if (fps > 0) {
+        struct v4l2_streamparm parm;
+        memset(&parm, 0, sizeof(parm));
+        parm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        parm.parm.capture.timeperframe.numerator = 1;
+        parm.parm.capture.timeperframe.denominator = (unsigned)fps;
+        if (ioctl(fd, VIDIOC_S_PARM, &parm) < 0) { close(fd); return -11; }
+    }
 
     struct v4l2_format fmt;
     memset(&fmt, 0, sizeof(fmt));

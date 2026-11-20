@@ -50,6 +50,23 @@ int main(int argc, char **argv) {
         printf("S_OUTPUT(port=0x%x) → rc=%d errno=%d\n", port, rc, rc < 0 ? errno : 0);
     }
 
+    /* 可选第 6 个参数：目标帧率。走 VIDIOC_S_PARM（0xc0cc5616，204 字节 =
+     * 32 位下的 struct v4l2_streamparm）——厂商 screencontrol 的录包里就有这一条。
+     * 不设的话驱动默认给 30fps。 */
+    if (argc >= 7) {
+        int want = atoi(argv[6]);
+        struct v4l2_streamparm parm;
+        memset(&parm, 0, sizeof(parm));
+        parm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        parm.parm.capture.timeperframe.numerator = 1;
+        parm.parm.capture.timeperframe.denominator = want;
+        int rc = ioctl(fd, VIDIOC_S_PARM, &parm);
+        printf("S_PARM(fps=%d) → rc=%d errno=%d  实际=%u/%u\n", want, rc,
+               rc < 0 ? errno : 0,
+               parm.parm.capture.timeperframe.numerator,
+               parm.parm.capture.timeperframe.denominator);
+    }
+
     struct v4l2_format fmt;
     memset(&fmt, 0, sizeof(fmt));
     fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
