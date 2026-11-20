@@ -146,6 +146,27 @@ public class ScreenControlManager {
             new java.util.concurrent.atomic.AtomicInteger();
     static int clientCount() { return STREAM_CLIENTS.get(); }
 
+    // ---- 空闲停采：没人看的时候不要把电视的 CPU 一直占着 ----
+    //
+    // 旧实现只要进程活着就按采集接口能跑多快跑多快地 grab → 编码 → 广播，
+    // 与有没有观看端无关。实测常驻 screencontrol 36% + app_process 33%（合计 0.69 核），
+    // 而电视自己硬解 1080p 只用 0.16 核 —— 不看的时候这份开销纯属浪费。
+    //
+    // 注意两件事：
+    //  1) 只暂停「抓帧」，不销毁采集线程。PITFALLS 里写过：起新管线前必须等旧采集线程
+    //     真的从 native_ScreenCapture 退出来，否则厂商 screencontrol 会累积未释放的会话，
+    //     最后返回空帧且不自愈。空闲态留在同一个线程里睡，天然不会撞上这个问题。
+    //  2) 音频不跟着停。tinycap 反复开关会让 loopback 退化到「能打开但不产数据」，
+    //     只能重启电视恢复，风险远大于它那 0.8% 的 CPU。
+    /** 无人观看多久后暂停采集（毫秒）；-Dtvss.idleMs=0 可关闭该功能 */
+    static final long IDLE_MS = Long.getLong("tvss.idleMs", 30000L);
+    /** 最近一次「有观看端」的时刻 */
+    static volatile long LAST_VIEWER_MS = System.currentTimeMillis();
+    /** 采集是否已因空闲暂停 */
+    static volatile boolean IDLE = false;
+    /** 空闲期间 /snap 要求补一帧 */
+    static volatile boolean SNAP_WANTED = false;
+
     // ---- 视频客户端注册表：每端一个有界队列，慢端只丢自己的帧 ----
 
     /** 同时在线的视频流客户端上限（防止线程/内存被耗光） */
@@ -250,6 +271,14 @@ public class ScreenControlManager {
                 try { Thread.sleep(10000); } catch (InterruptedException ignored) { }
                 long f = STAT_FRAMES;
                 long now = System.currentTimeMillis();
+                if (IDLE) {
+                    // 空闲停采时本来就不产帧，不能按「帧数不涨」判卡住，
+                    // 否则每 30 秒白重启一次管线，还会累加到 10 分钟 3 次而误杀进程
+                    lastFrames = f;
+                    lastChange = now;
+                    restarts = 0;
+                    continue;
+                }
                 if (f != lastFrames) {
                     lastFrames = f;
                     lastChange = now;
@@ -331,7 +360,40 @@ public class ScreenControlManager {
 
         Thread capThread = new Thread(() -> {
             int fails = 0;
+            boolean wasIdle = false;
             while (gen == GEN) {
+                // 空闲判断：有观看端就刷新时刻；没有且超时就只睡不抓
+                if (clientCount() > 0) {
+                    LAST_VIEWER_MS = System.currentTimeMillis();
+                    if (wasIdle) {
+                        wasIdle = false;
+                        IDLE = false;
+                        System.out.println("idle: 有观看端接入，恢复采集（gen=" + gen + "）");
+                    }
+                } else if (IDLE_MS > 0 && System.currentTimeMillis() - LAST_VIEWER_MS > IDLE_MS) {
+                    if (!wasIdle) {
+                        wasIdle = true;
+                        IDLE = true;
+                        STAT_FPS = 0;
+                        STAT_KBPS = 0;
+                        System.out.println("idle: 无人观看超过 " + (IDLE_MS / 1000)
+                                + " 秒，暂停采集（gen=" + gen + "）");
+                    }
+                    // 空闲时仍要能出截图：借同一线程抓一帧交给编码线程，不并发调用厂商接口
+                    if (SNAP_WANTED) {
+                        SNAP_WANTED = false;
+                        byte[] shot = grab(srcType, w, h);
+                        if (shot != null && shot.length == w * h * 4) {
+                            synchronized (lock) {
+                                slot[0] = shot;
+                                produced[0]++;
+                                lock.notifyAll();
+                            }
+                        }
+                    }
+                    try { Thread.sleep(200); } catch (InterruptedException ignored) {}
+                    continue;
+                }
                 byte[] buf = grab(srcType, w, h);
                 if (buf == null || buf.length != w * h * 4) {
                     fails++;
@@ -345,6 +407,7 @@ public class ScreenControlManager {
                     lock.notifyAll();
                 }
             }
+            IDLE = false;
             System.out.println("capture thread gen=" + gen + " exit");
         }, "cap");
 
@@ -823,6 +886,16 @@ public class ScreenControlManager {
                 }
             } else if (path.startsWith("/snap")) {
                 byte[] jpg = latestJpeg;
+                if (jpg == null || IDLE) {
+                    // 空闲停采后 latestJpeg 可能是几分钟前的旧帧；这里让采集线程补抓一帧
+                    long before = latestSeq;
+                    SNAP_WANTED = true;
+                    long deadline = System.currentTimeMillis() + 2000;
+                    while (latestSeq == before && System.currentTimeMillis() < deadline) {
+                        try { Thread.sleep(50); } catch (InterruptedException ignored) { }
+                    }
+                    jpg = latestJpeg;
+                }
                 if (jpg == null) {
                     send(out, "text/plain", "no frame yet".getBytes("UTF-8"), true);
                 } else {
@@ -933,7 +1006,7 @@ public class ScreenControlManager {
                 String json = "{\"fps\":" + String.format(java.util.Locale.US, "%.2f", STAT_FPS)
                         + ",\"kbps\":" + String.format(java.util.Locale.US, "%.0f", STAT_KBPS)
                         + ",\"w\":" + STAT_W + ",\"h\":" + STAT_H
-                        + ",\"clients\":" + STAT_CLIENTS
+                        + ",\"clients\":" + clientCount()
                         + ",\"frames\":" + STAT_FRAMES
                         + ",\"audio\":" + AudioStream.isRunning()
                         + ",\"aclients\":" + AudioStream.clientCount()
@@ -942,7 +1015,9 @@ public class ScreenControlManager {
                         + ",\"apeak\":" + AudioStream.peak()
                         + ",\"aerr\":\"" + jsonEscape(AudioStream.lastError()) + "\""
                         + ",\"aback\":\"" + jsonEscape(AudioStream.backend()) + "\""
-                        + ",\"awake\":" + awakeCached() + "}";
+                        + ",\"awake\":" + awakeCached()
+                        + ",\"idle\":" + IDLE
+                        + ",\"idleMs\":" + IDLE_MS + "}";
                 send(out, "application/json", json.getBytes("UTF-8"), true);
             } else {
                 send(out, "text/html; charset=utf-8", page().getBytes("UTF-8"), false);
