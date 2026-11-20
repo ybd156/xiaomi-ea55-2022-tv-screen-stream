@@ -216,6 +216,32 @@ NAL 类型: {5(IDR):11, 7(SPS):21, 1(非IDR):120}
 **推荐：480×270 / q45 / 30 fps ≈ 4.4 Mbps** —— 相比原厂商路径（480p / 16.6 fps / ~5 Mbps），
 帧率 1.8×，码率略低。960×540 要 10.6 Mbps，ZT 链路上会排队，除非走局域网。
 
+### 11.5 开机默认 + 音频验证（2026-11-21 04:20）
+
+`deploy/tv-screen-stream.sh` 已改为 **VDIN 优先**（安装到 `/data/adb/service.d/`）：
+
+- 默认 `TVSS_MODE=serve-vdin`、`480x270`、`q45`（可用环境变量覆盖）
+- 起服务前先 `stop screencontrol` 并轮询确认它真的退出（它握着 `/dev/video12`）
+- **VDIN 起不来自动回退 `serve`**（并 `start screencontrol`），不会让电视没画面
+- 看护循环每 20 秒：进程挂了就拉起；**若 `screencontrol` 又出现（MiTV 会自己拉），重新停掉**
+- 缺 `libvdin.so` 时自动降级为 `serve`
+
+**踩坑（重要）**：脚本里的 `DEX=/data/local/tmp/sc.dex`。本轮把新 dex 推到了 `sc-vdin.dex`，
+导致脚本跑到的是旧 dex —— 旧 dex 不认识 `serve-vdin`，落进 `single()` 分支采一帧就退出，
+日志表现为「VDIN 起不来，回退厂商模式」。**换 dex 必须覆盖 `sc.dex` 本身。**
+
+端到端实测（改完后）：
+
+| 项 | 结果 |
+|---|---|
+| 视频 | 480×270 / **30.3 fps** / **3.8 Mbps** |
+| 音频 | `apeak=87`、`abytes` 持续增长、`/pcm` 实测 191,488 B/s（实时 192,000，99.7%） |
+| `/snap` | 480×270 / 14.4 KB 正常 |
+| 进程 | `serve-vdin 1 480 270 8899 480 270 45`，`screencontrol` 为空 |
+| 看护实战 | 日志出现 `screencontrol 又出现了，重新停掉`，之后稳定 30 fps |
+
+> 音频不经过 VDIN，走原 `tinycap` 8 声道下混路径，VDIN 模式下未受影响。
+
 ## 9. 遥控注入延时（2026-11-21，真机实测）
 
 **根因**：旧实现每次 `Runtime.exec("input keyevent N")`。`/system/bin/input` 是 shell 脚本，

@@ -38,7 +38,7 @@
 | 遥控（按键 / 文字注入） | ✅ 已真机验证 | 2026-11-14 用户实测按键有效；`/key` `/text` 要求令牌，`POWER` 不在白名单，见 [ADR 0004](docs/decisions/0004-控制端点需要令牌.md)。**2026-11-21 注入改走 `InputManager.injectInputEvent`**：`/key` 往返 880 ms → 50–60 ms（`input` 子进程每次起 JVM 实测 846 ms），见 [MEASUREMENTS](docs/MEASUREMENTS.md) §9 |
 | H.264 推流 | ⚠️ 已编译 + 已解码验证 | 软解 82 帧通过，**但未在浏览器里播放过** |
 | 多平台适配 | ❌ 未开始 | — |
-| 开机自启 + 崩溃自愈 | ✅ 已真机验证 | 2026-11-07 重启 3 次验证，单实例、20 秒内自愈 |
+| 开机自启 + 崩溃自愈 | ✅ 已真机验证 | 2026-11-07 重启 3 次验证，单实例、20 秒内自愈。**2026-11-21 起默认走 `serve-vdin`**：先停 screencontrol 抢独占设备，VDIN 起不来自动回退 `serve`；看护每 20 秒复查（screencontrol 被 MiTV 拉起会重新停掉） |
 | 空闲停采（无人观看时停采集） | ✅ 已真机验证 | 2026-11-20：空闲后 `screencontrol` 44%→4%、`app_process` 47%→8%，合计 0.91→0.12 核；接 `/raw` 后 200 ms 内恢复出流；空闲态 `/snap` 现场补抓一帧。见 [MEASUREMENTS](docs/MEASUREMENTS.md) §8 |
 | VDIN 直采模式（`serve-vdin`） | ✅ 采集+编码+HTTP 全链路真机验证；⚠️ 非默认、需停 screencontrol | 2026-11-21：绕过厂商 API 直开 `/dev/video12` 常开流（NV21），**帧率与分辨率解耦、恒定 30 fps**（厂商路径 480p/960p/720p/1080p 分别是 16.6/8.3/5.5/3.0）；新瓶颈变成 MJPEG 码率（960p 达 13 Mbps）。见 [MEASUREMENTS](docs/MEASUREMENTS.md) §11、[ABI](probe/vdin/ABI.md) |
 | 鉴权 / TLS | ❌ 未实现 | — |
