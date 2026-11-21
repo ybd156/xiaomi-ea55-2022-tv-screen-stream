@@ -1,18 +1,22 @@
 #!/system/bin/sh
-# TV Screen Stream —— 屏幕保活（防止电视自己待机导致远程全部失联）
+# TV Screen Stream —— 常驻可达（允许息屏，但保证网络与服务不被清理）
 #
-# 背景（2026-11-21 事故）：电视进入待机后网络被断开，8899 / adb / ZeroTier / 米家
-# 全部同时失联，而整机 uptime 连续（说明没关机）。外网连不上就无法远程唤醒，
-# 所以唤醒动作必须发生在电视本机 —— 走 loopback 调我们自己的 /wake。
+# 背景（2026-11-21 实测）：
+#   电视待机时**网络并没有断**（接口全在、能 ping 通对端），
+#   真正消失的是**我们的进程** —— 系统在待机时把后台进程（我们的服务、adbd、
+#   zerotier）一起清掉了，所以从外面看是「整机失联」。
 #
-# 行为：
-#   * 白天窗口（默认 08:00–23:59）内，若检测到 mWakefulness != Awake，调用本地 /wake
-#   * 夜间窗口不干预，允许电视正常待机（否则等于永远关不掉）
-#   * 顺带持续重申 stay_on_while_plugged_in=3（MiTV 会在 1–2 分钟内重置回 0）
+# 解法（已实测）：
+#   拿一个内核 wakelock 阻止系统进入挂起/清理。实测息屏 55 秒期间
+#   mWakefulness=Asleep 而服务进程存活、loopback 有响应、PC 侧 8899 全程可达。
+#
+# 因此本脚本**不再强行点亮屏幕**：让电视照常息屏（省电、不刺眼），
+# 只负责常驻 wakelock 与重现可达性所需的最小状态。
+# 想亮屏时用遥控器，或访问 /wake。
 #
 # 关闭方式：
-#   touch /data/local/tmp/tvss-no-keepawake     # 立即停手（脚本仍在跑但不动作）
-#   rm /data/adb/service.d/tvss-keepawake.sh    # 彻底移除（重启后不再运行）
+#   touch /data/local/tmp/tvss-no-keepawake     # 停止维护（会释放 wakelock）
+#   rm /data/adb/service.d/tvss-keepawake.sh    # 彻底移除
 #
 # 日志：/data/local/tmp/tvss-keepawake.log
 
@@ -20,24 +24,20 @@ export PATH=/system/bin:/system/xbin:/vendor/bin:/vendor/xbin:/sbin:$PATH
 
 LOG=/data/local/tmp/tvss-keepawake.log
 OFF=/data/local/tmp/tvss-no-keepawake
-PORT=8899
-DAY_START=${TVSS_AWAKE_FROM:-8}
-DAY_END=${TVSS_AWAKE_TO:-24}
+LOCK=/data/local/tmp/tvss-keepawake.lock
+WL_NAME=tvss
 
 log() { echo "[$(date '+%m-%d %H:%M:%S')] $*" >> "$LOG"; }
 
-wakefulness() {
-    dumpsys power 2>/dev/null | grep -o 'mWakefulness=[A-Za-z]*' | head -1 | cut -d= -f2
-}
-
-local_wake() {
-    # 优先走服务端点（PowerManager.wakeUp，比 keyevent 可靠）
-    wget -q -O /dev/null --timeout=6 "http://127.0.0.1:$PORT/wake" 2>/dev/null && return 0
-    busybox wget -q -O - --timeout=6 "http://127.0.0.1:$PORT/wake" >/dev/null 2>&1 && return 0
-    # 兜底：直接注入电源键（部分固件对 KEYCODE_WAKEUP 无反应，POWER 有效）
-    input keyevent KEYCODE_WAKEUP 2>/dev/null
-    return 0
-}
+# 单实例
+if [ -f "$LOCK" ]; then
+    old=$(cat "$LOCK" 2>/dev/null)
+    if [ -n "$old" ] && [ -d "/proc/$old" ]; then
+        echo "already running pid=$old" >> "$LOG"
+        exit 0
+    fi
+fi
+echo $$ > "$LOCK"
 
 # ---- 等开机完成 ----
 i=0
@@ -46,28 +46,33 @@ while [ $i -lt 150 ]; do
     sleep 2
     i=$((i + 1))
 done
-sleep 30
+sleep 20
 
-log "==== 保活启动（窗口 ${DAY_START}:00–${DAY_END}:00） ===="
+# 允许电视自己息屏（之前为了防待机把它设成常亮，现在不需要了）
+settings put global stay_on_while_plugged_in 0 2>/dev/null
+
+log "==== 可达性守护启动（wakelock=$WL_NAME，允许息屏） ===="
 
 while true; do
     if [ -f "$OFF" ]; then
-        sleep 60
+        # 用户要求停手：把 wakelock 还回去，让系统照常管理
+        echo "$WL_NAME" > /sys/power/wake_unlock 2>/dev/null
+        sleep 30
         continue
     fi
 
-    h=$(date +%H | sed 's/^0*//'); [ -z "$h" ] && h=0
-    if [ "$h" -ge "$DAY_START" ] && [ "$h" -lt "$DAY_END" ]; then
-        st=$(wakefulness)
-        if [ "$st" != "Awake" ]; then
-            log "检测到 ${st:-unknown}，本地唤醒"
-            local_wake
-            sleep 6
-            log "唤醒后：$(wakefulness)"
-        fi
-        cur=$(settings get global stay_on_while_plugged_in)
-        [ "$cur" != "3" ] && settings put global stay_on_while_plugged_in 3 2>/dev/null
-    fi
+    held=$(cat /sys/power/wake_lock 2>/dev/null)
+    case "$held" in
+        *"$WL_NAME"*) : ;;
+        *)
+            echo "$WL_NAME" > /sys/power/wake_lock 2>/dev/null
+            cur=$(cat /sys/power/wake_lock 2>/dev/null)
+            case "$cur" in
+                *"$WL_NAME"*) log "已获取 wakelock（当前: $cur）" ;;
+                *) log "获取 wakelock 失败（当前: $cur）" ;;
+            esac
+            ;;
+    esac
 
-    sleep 45
+    sleep 30
 done
